@@ -1,0 +1,33 @@
+{
+  "name": "quick-fix",
+  "description": "Run tests, then ask Claude to fix failures",
+  "backend": "claude",
+  "steps": [
+    {
+      "id": "run_tests",
+      "type": "shell",
+      "name": "Run tests",
+      "command": "echo 'All tests passed (simulated)'"
+    },
+    {
+      "id": "check",
+      "type": "condition",
+      "name": "Did tests pass?",
+      "prompt": "Do the test results indicate success with no failures or errors?",
+      "if_true": "done",
+      "if_false": "fix"
+    },
+    {
+      "id": "fix",
+      "type": "llm",
+      "name": "Fix issues",
+      "prompt": "{{memory.always}}\n\nTest output:\n{{steps.run_tests.output}}\n\nAnalyze these failures and describe what needs to be fixed."
+    },
+    {
+      "id": "done",
+      "type": "human_input",
+      "name": "Done",
+      "prompt": "Loop complete. Press Enter to exit."
+    }
+  ]
+}

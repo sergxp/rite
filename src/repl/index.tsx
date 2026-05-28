@@ -162,12 +162,6 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
         for (const t of resumed.turns) histRef.current.add(t.role, t.content);
         setAssistantBackend(resumed.backend);
         setRuntimeConfig((c) => ({ ...c, backend: resumed.backend }));
-        // Write history directly to stdout (avoids Static clipping for tall histories)
-        write(renderSystemAnsi(`Resumed: ${resumed.name ?? resumed.id}`));
-        for (const t of resumed.turns) {
-          if (t.role === "user") write(renderUserAnsi(t.content));
-          else if (t.role === "assistant") write(renderAssistantAnsi(t.content));
-        }
         setCompleted([
           {
             id: makeId("sys"),
@@ -175,6 +169,15 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
             content: `Resumed: ${resumed.name ?? resumed.id}`,
           },
         ]);
+        // Defer writes until after the initial render so the live area is
+        // already in place before we write — prevents ghost status bars.
+        setImmediate(() => {
+          write(renderSystemAnsi(`Resumed: ${resumed.name ?? resumed.id}`));
+          for (const t of resumed.turns) {
+            if (t.role === "user") write(renderUserAnsi(t.content));
+            else if (t.role === "assistant") write(renderAssistantAnsi(t.content));
+          }
+        });
       } catch {
         const s = createSession(config, "repl");
         sessionRef.current = s;
@@ -402,11 +405,12 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
         saveSession(s);
       }
 
-      // Write user message directly to stdout — bypasses Static to avoid cursor-tracking issues
-      write(renderUserAnsi(trimmed));
       setBusy(true);
       liveRef.current = "";
       setActiveTool(null);
+      // Write user message after setBusy so Ink has collapsed the Composer live
+      // area before we write — prevents the status bar from stamping a ghost line.
+      setImmediate(() => write(renderUserAnsi(trimmed)));
 
       const abortController = new AbortController();
       abortControllerRef.current = abortController;
@@ -669,17 +673,21 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
           for (const t of resumed.turns) histRef.current.add(t.role, t.content);
           resumed.updatedAt = new Date().toISOString();
           saveSession(resumed);
-          // Write session header + history directly to stdout (avoids Static clipping)
-          write(renderSystemAnsi(`Switched to: ${resumed.name ?? resumed.id}`));
-          for (const t of resumed.turns) {
-            if (t.role === "user") write(renderUserAnsi(t.content));
-            else if (t.role === "assistant") write(renderAssistantAnsi(t.content));
-          }
-          // Keep completed in sync for system-message rendering only
+          refreshMemories();
           addCompleted({
             id: makeId("sys"),
             role: "system",
             content: `Switched to: ${resumed.name ?? resumed.id}`,
+          });
+          // Defer all writes until after Ink re-renders the main component
+          // (live area collapses from picker → main). Writing synchronously here
+          // causes the status bar to be stamped out once per write call.
+          setImmediate(() => {
+            write(renderSystemAnsi(`Switched to: ${resumed.name ?? resumed.id}`));
+            for (const t of resumed.turns) {
+              if (t.role === "user") write(renderUserAnsi(t.content));
+              else if (t.role === "assistant") write(renderAssistantAnsi(t.content));
+            }
           });
         }}
         onCancel={() => setShowPicker(false)}

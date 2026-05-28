@@ -1,5 +1,5 @@
 import React, { useState, useRef, useCallback, useEffect } from "react";
-import { render, Box, Text, Static, useApp, useInput, useStdout } from "ink";
+import { render, Box, Text, useApp, useInput, useStdin } from "ink";
 import { ConversationHistory } from "./history.js";
 import { buildEnrichedPrompt } from "./enricher.js";
 import { loadMemories } from "../memory/reader.js";
@@ -17,12 +17,7 @@ import { autoNameSession } from "../sessions/namer.js";
 import { SessionPicker } from "../sessions/picker.js";
 import { appendAuditEvent } from "../audit/writer.js";
 import { Composer } from "./composer.js";
-import { MessageBubble, type Message } from "./message.js";
-import {
-  renderAssistantAnsi,
-  renderUserAnsi,
-  renderSystemAnsi,
-} from "./ansi-render.js";
+import { MessageBubble, type Message, type MessageRole } from "./message.js";
 import {
   setBackend,
   parseBackendTarget,
@@ -40,6 +35,63 @@ function makeId(prefix: string) {
 }
 
 const SPINNER = ["|", "/", "-", "\\", "|", "/", "-", "\\", "|", "/"];
+
+/** Estimate how many terminal rows a message will occupy in the viewport. */
+function estimateMsgLines(msg: Message, termWidth: number): number {
+  const contentWidth = Math.max(10, termWidth - 8);
+  switch (msg.role) {
+    case "system":
+      return 2;
+    case "thinking": {
+      const lines = msg.content.split("\n").filter(Boolean);
+      return Math.min(12, lines.length + 4);
+    }
+    case "tool_call": {
+      const hasResult = msg.toolResult !== undefined;
+      if (!hasResult) return 3;
+      const resultLines = (msg.toolResult ?? "").split("\n").filter((l) => l.trim()).slice(0, 5);
+      return 3 + resultLines.length + 1;
+    }
+    default: {
+      // user / assistant
+      const headerLines = 2;
+      const rawLines = msg.content.split("\n");
+      let count = headerLines;
+      for (const line of rawLines) {
+        count += Math.max(1, Math.ceil((line.length || 1) / contentWidth));
+      }
+      return count + 1; // bottom margin
+    }
+  }
+}
+
+/** Returns the slice of messages that fits in viewportRows, respecting scrollLines offset. */
+function getVisibleMessages(
+  messages: Message[],
+  scrollLines: number,
+  viewportRows: number,
+  termWidth: number
+): { messages: Message[]; hasMore: boolean } {
+  if (viewportRows <= 0) return { messages: [], hasMore: false };
+  const counts = messages.map((m) => estimateMsgLines(m, termWidth));
+  const totalLines = counts.reduce((a, b) => a + b, 0);
+
+  const windowEnd = totalLines - scrollLines;
+  const windowStart = windowEnd - viewportRows;
+
+  let acc = 0;
+  const visible: Message[] = [];
+  for (let i = 0; i < messages.length; i++) {
+    const msgStart = acc;
+    const msgEnd = acc + counts[i];
+    if (msgEnd > windowStart && msgStart < windowEnd) {
+      visible.push(messages[i]);
+    }
+    acc = msgEnd;
+  }
+
+  return { messages: visible, hasMore: windowStart > 0 };
+}
 
 function isValidBackend(s: string): s is BackendName {
   return s === "claude" || s === "codex" || s === "copilot";
@@ -72,12 +124,13 @@ interface ReplProps {
 
 function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
   const { exit } = useApp();
-  const { write } = useStdout();
+  const { stdin } = useStdin();
 
-  // Completed messages go into <Static> — only grows, never mutates old items.
-  // staticKey is bumped on /clear to remount Static from scratch.
-  const [staticKey, setStaticKey] = useState(0);
+  // All completed messages — rendered in the managed viewport.
   const [completed, setCompleted] = useState<Message[]>([]);
+  // scrollLines: lines scrolled above bottom (0 = pinned to bottom)
+  const [scrollLines, setScrollLines] = useState(0);
+  const atBottomRef = useRef(true);
 
   // Live area
   const [streamContent, setStreamContent] = useState("");
@@ -147,6 +200,26 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
     return () => clearInterval(t);
   }, [busy]);
 
+  //  mouse scroll 
+
+  useEffect(() => {
+    if (!stdin) return;
+    const handler = (dir: unknown) => {
+      if (dir === "up") {
+        atBottomRef.current = false;
+        setScrollLines((s) => s + 3);
+      } else {
+        setScrollLines((s) => {
+          const next = Math.max(0, s - 3);
+          atBottomRef.current = next === 0;
+          return next;
+        });
+      }
+    };
+    stdin.on("mouse_scroll", handler);
+    return () => { stdin.off("mouse_scroll", handler); };
+  }, [stdin]);
+
   //  init 
 
   useEffect(() => {
@@ -162,38 +235,26 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
         for (const t of resumed.turns) histRef.current.add(t.role, t.content);
         setAssistantBackend(resumed.backend);
         setRuntimeConfig((c) => ({ ...c, backend: resumed.backend }));
-        // Load resumed session history directly into completed messages.
+        const turns: Message[] = resumed.turns.map((t) => ({
+          id: makeId(t.role),
+          role: t.role as MessageRole,
+          content: t.content,
+        }));
         setCompleted([
-          {
-            id: makeId("sys"),
-            role: "system",
-            content: `Resumed: ${resumed.name ?? resumed.id}`,
-          },
+          { id: makeId("sys"), role: "system", content: `Resumed: ${resumed.name ?? resumed.id}` },
+          ...turns,
         ]);
-        // Defer writes until after the initial render so the live area is
-        // already in place before we write — prevents ghost status bars.
-        setImmediate(() => {
-          write(renderSystemAnsi(`Resumed: ${resumed.name ?? resumed.id}`));
-          for (const t of resumed.turns) {
-            if (t.role === "user") write(renderUserAnsi(t.content));
-            else if (t.role === "assistant") write(renderAssistantAnsi(t.content));
-          }
-        });
       } catch {
         const s = createSession(config, "repl");
         sessionRef.current = s;
         saveSession(s);
         setCompleted([
-          {
-            id: makeId("sys"),
-            role: "system",
-            content: `Session not found. Starting fresh.`,
-          },
+          { id: makeId("sys"), role: "system", content: `Session not found. Starting fresh.` },
         ]);
       }
     }
     // No else branch — session is created lazily on first message submit.
-  }, [config, resumeSessionId, write]);
+  }, [config, resumeSessionId]);
 
   //  helpers 
 
@@ -317,11 +378,12 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
           s.updatedAt = new Date().toISOString();
           saveSession(s);
         }
-        // Remount <Static> from scratch — Gemini CLI pattern for visual clear
-        setStaticKey((k) => k + 1);
+        // Clear completed and snap back to bottom
         setCompleted([
           { id: makeId("sys"), role: "system", content: "Context cleared." },
         ]);
+        setScrollLines(0);
+        atBottomRef.current = true;
         return;
       }
 
@@ -409,9 +471,10 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
       setBusy(true);
       liveRef.current = "";
       setActiveTool(null);
-      // Write user message after setBusy so Ink has collapsed the Composer live
-      // area before we write — prevents the status bar from stamping a ghost line.
-      setImmediate(() => write(renderUserAnsi(trimmed)));
+      // Snap to bottom and add user message immediately.
+      setScrollLines(0);
+      atBottomRef.current = true;
+      addCompleted({ id: makeId("user"), role: "user", content: trimmed });
 
       const abortController = new AbortController();
       abortControllerRef.current = abortController;
@@ -489,14 +552,14 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
 
       let fullResponse = "";
       let cancelled = false;
-      let writeAfterCollapse: (() => void) | null = null;
-      // Track current thinking block — emitted to Static when the block ends.
+      let pendingMsg: Message | null = null;
+      // Track current thinking block — emitted to completed when the block ends.
       let pendingThinkingText = "";
       // Hold tool calls until we have the result (then emit as one message).
       const pendingToolCalls = new Map<string, { name: string; inputJson: string; startedAt: number }>();
       thinkingRef.current = { chars: 0, text: "" };
 
-      /** Flush the current thinking block to Static and reset live tracking. */
+      /** Flush the current thinking block to completed and reset live tracking. */
       const flushThinking = () => {
         if (!pendingThinkingText.trim()) return;
         addCompleted({ id: makeId("think"), role: "thinking", content: pendingThinkingText });
@@ -583,7 +646,7 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
           }
         }
 
-        writeAfterCollapse = () => write(renderAssistantAnsi(fullResponse));
+        pendingMsg = { id: makeId("asst"), role: "assistant", content: fullResponse };
 
         await compressHistoryIfNeeded(histRef.current, runtimeConfig);
 
@@ -604,15 +667,15 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
         if (isAbort) {
           cancelled = true;
           if (fullResponse.trim()) {
-            writeAfterCollapse = () => write(renderAssistantAnsi(fullResponse + "\n\n*[cancelled]*"));
+            pendingMsg = { id: makeId("asst"), role: "assistant", content: fullResponse + "\n\n*[cancelled]*" };
             histRef.current.add("user", trimmed);
             histRef.current.add("assistant", fullResponse);
           } else {
-            writeAfterCollapse = () => write(renderSystemAnsi("Cancelled."));
+            pendingMsg = { id: makeId("sys"), role: "system", content: "Cancelled." };
           }
         } else {
           const msg = err instanceof Error ? err.message : String(err);
-          writeAfterCollapse = () => write(renderSystemAnsi(`Error: ${msg}`));
+          pendingMsg = { id: makeId("sys"), role: "system", content: `Error: ${msg}` };
         }
       } finally {
         abortControllerRef.current = null;
@@ -631,8 +694,7 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
         setStreamContent("");
         liveRef.current = "";
         setActiveTool(null);
-        const pendingWrite = writeAfterCollapse;
-        if (pendingWrite) setImmediate(pendingWrite);
+        if (pendingMsg) addCompleted(pendingMsg);
       }
     },
     [
@@ -643,7 +705,6 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
       refreshMemories,
       persistBackend,
       addCompleted,
-      write,
       exit,
     ]
   );
@@ -664,16 +725,16 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
           resumed.updatedAt = new Date().toISOString();
           saveSession(resumed);
           refreshMemories();
-          setStaticKey((k) => k + 1);
-          setCompleted([]);
-          setImmediate(() => {
-            write(renderSystemAnsi(`Switched to: ${resumed.name ?? resumed.id}`));
-            for (const t of resumed.turns) {
-              if (t.role === "user") write(renderUserAnsi(t.content));
-              else if (t.role === "assistant") write(renderAssistantAnsi(t.content));
-              else write(renderSystemAnsi(t.content));
-            }
-          });
+          setScrollLines(0);
+          atBottomRef.current = true;
+          setCompleted([
+            { id: makeId("sys"), role: "system", content: `Switched to: ${resumed.name ?? resumed.id}` },
+            ...resumed.turns.map((t) => ({
+              id: makeId(t.role),
+              role: t.role as MessageRole,
+              content: t.content,
+            })),
+          ]);
         }}
         onCancel={() => setShowPicker(false)}
       />
@@ -687,25 +748,18 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
     ? (sessionRef.current.name ?? sessionRef.current.id.slice(0, 10))
     : "";
 
-  // Composer takes ~5 rows (status + border-top + input + border-bottom + hints).
   const COMPOSER_ROWS = 5;
   const viewportRows = process.stdout.rows ?? 24;
+  const termWidth = process.stdout.columns ?? 80;
 
-  // Budget rows for the live area. When thinking is active (no response text yet),
-  // split the budget: up to half for thinking lines, rest for margin/chrome.
-  // Once response text arrives, collapse thinking to 1 summary line.
+  // Budget rows for the live area.
   const liveAreaBudget = Math.max(4, viewportRows - COMPOSER_ROWS - 2);
   const thinkingLinesBudget = streamContent ? 0 : Math.floor(liveAreaBudget / 2);
-  const streamPreviewLines = streamContent
-    ? liveAreaBudget - 1
-    : liveAreaBudget - thinkingLinesBudget;
+  const streamPreviewLines = streamContent ? liveAreaBudget - 1 : liveAreaBudget - thinkingLinesBudget;
 
-  // Response text preview — only actual text, never thinking content.
   const streamPreview = streamContent
     ? streamContent.split("\n").slice(-streamPreviewLines).join("\n")
     : "";
-
-  // Thinking display: live lines while reasoning, 1-line summary once response starts.
   const thinkingLines = thinkingPreview
     ? thinkingPreview.split("\n").slice(-thinkingLinesBudget).join("\n")
     : "";
@@ -714,62 +768,68 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
       ? `reasoned for ${(thinkingChars / 1000).toFixed(1)}k chars`
       : null;
 
-  return (
-    <Box flexDirection="column">
-      {/*  Completed messages — printed permanently above the live area  */}
-      <Static key={staticKey} items={completed}>
-        {(msg) => <MessageBubble key={msg.id} message={msg} />}
-      </Static>
+  // Rows available for the message viewport (shrinks when live area is active).
+  const liveAreaRows = isWorking && (streamPreview || thinkingLines || thinkingSummary || activeTool)
+    ? liveAreaBudget
+    : 0;
+  const msgViewportRows = Math.max(2, viewportRows - COMPOSER_ROWS - liveAreaRows - 1);
 
-      {/*  Live: shown while busy with content to display.
-           Thinking streams as capped live lines; once response text arrives it
-           collapses to a 1-line summary so the live area never overflows the viewport.
-           Completed tool calls and thinking blocks land in Static above.  */}
+  const { messages: visibleMessages, hasMore } = getVisibleMessages(
+    completed,
+    scrollLines,
+    msgViewportRows,
+    termWidth
+  );
+
+  return (
+    <Box flexDirection="column" height={viewportRows}>
+      {/*  Message viewport — fixed height, line-count-based scroll  */}
+      <Box flexDirection="column" height={msgViewportRows} overflow="hidden">
+        {visibleMessages.map((msg) => (
+          <MessageBubble key={msg.id} message={msg} />
+        ))}
+      </Box>
+
+      {/*  Scroll indicator  */}
+      {hasMore && (
+        <Box paddingLeft={2}>
+          <Text dimColor>↑  scroll up for history  (mouse wheel)</Text>
+        </Box>
+      )}
+
+      {/*  Live area — streams thinking + response preview while busy  */}
       {isWorking && (streamPreview || thinkingLines || thinkingSummary || activeTool) && (
         <Box flexDirection="column" marginBottom={1} flexShrink={0}>
           <Box paddingLeft={1}>
-            <Text color="greenBright" bold>
-              rite
-            </Text>
+            <Text color="greenBright" bold>rite</Text>
           </Box>
           {thinkingLines && (
             <Box paddingLeft={3}>
-              <Text wrap="wrap" dimColor color="gray">
-                {thinkingLines}
-              </Text>
+              <Text wrap="wrap" dimColor color="gray">{thinkingLines}</Text>
             </Box>
           )}
           {thinkingSummary && (
             <Box paddingLeft={3}>
-              <Text dimColor>
-                {thinkingSummary}
-              </Text>
+              <Text dimColor>{thinkingSummary}</Text>
             </Box>
           )}
           {activeTool && (
             <Box paddingLeft={3}>
-              <Text dimColor>
-                {SPINNER[spinnerFrame]} {activeTool}
-              </Text>
+              <Text dimColor>{SPINNER[spinnerFrame]} {activeTool}</Text>
             </Box>
           )}
           {streamPreview && (
             <Box paddingLeft={3}>
-              <Text wrap="wrap" color="gray" dimColor>
-                {streamPreview}
-              </Text>
+              <Text wrap="wrap" color="gray" dimColor>{streamPreview}</Text>
             </Box>
           )}
         </Box>
       )}
 
-      {/*  Fixed composer at bottom  */}
+      {/*  Composer — sticky at bottom  */}
       <Composer
         value={input}
-        onChange={(v) => {
-          setInput(v);
-          setHistoryIdx(null);
-        }}
+        onChange={(v) => { setInput(v); setHistoryIdx(null); }}
         onSubmit={(v) => void handleSubmit(v)}
         busy={isWorking}
         backend={assistantBackend}
@@ -784,20 +844,79 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
 
 //  entry point 
 
+const ALT_ENTER = "\x1b[?1049h\x1b[H\x1b[2J"; // enter alt screen, clear, cursor home
+const ALT_EXIT  = "\x1b[?1049l";               // exit alt screen → restores original buffer
+
+// Intercepts process.stdin.push() — the point where OS bytes enter the readable
+// buffer. Strips raw SGR mouse sequences before Ink reads them, and emits a
+// custom 'mouse_scroll' event on stdin that the Repl component listens to.
+function installStdinMouseFilter(): () => void {
+  const SGR_RE = /\x1b\[<\d+;\d+;\d+[Mm]/g;
+  const origPush = (process.stdin.push as (...a: unknown[]) => boolean).bind(process.stdin);
+
+  (process.stdin as unknown as Record<string, unknown>).push = function (
+    chunk: Buffer | string | null,
+    encoding?: BufferEncoding
+  ): boolean {
+    if (chunk !== null && chunk !== undefined) {
+      const str = Buffer.isBuffer(chunk) ? chunk.toString("binary") : String(chunk);
+      for (const m of str.matchAll(/\x1b\[<(\d+);\d+;\d+M/g)) {
+        const code = parseInt(m[1], 10);
+        if (code === 64) process.stdin.emit("mouse_scroll", "up");
+        else if (code === 65) process.stdin.emit("mouse_scroll", "down");
+      }
+      const filtered = str.replace(SGR_RE, "");
+      if (!filtered) return true;
+      chunk = Buffer.isBuffer(chunk) ? Buffer.from(filtered, "binary") : filtered;
+    }
+    return origPush(chunk, encoding);
+  };
+
+  return () => {
+    (process.stdin as unknown as Record<string, unknown>).push = origPush;
+  };
+}
+
 export async function startRepl(
   backend: BackendName,
   historyLimit: number,
   config: RiteConfig,
   resumeSessionId?: string
 ): Promise<void> {
-  const { waitUntilExit } = render(
-    <Repl
-      backend={backend}
-      historyLimit={historyLimit}
-      config={config}
-      resumeSessionId={resumeSessionId}
-    />
-  );
-  await waitUntilExit();
+  // Enter alt screen (own buffer — original terminal content restored on exit)
+  process.stdout.write(ALT_ENTER);
+  // Enable SGR mouse reporting so scroll-wheel events reach stdin as sequences
+  process.stdout.write("\x1b[?1000h\x1b[?1006h");
+
+  const uninstall = installStdinMouseFilter();
+
+  const cleanup = () => {
+    uninstall();
+    process.stdout.write("\x1b[?1000l\x1b[?1006l"); // disable mouse reporting
+    process.stdout.write(ALT_EXIT);
+  };
+
+  const onExit = () => cleanup();
+  const onSignal = () => { cleanup(); process.exit(0); };
+  process.once("exit", onExit);
+  process.once("SIGINT", onSignal);
+  process.once("SIGTERM", onSignal);
+
+  try {
+    const { waitUntilExit } = render(
+      <Repl
+        backend={backend}
+        historyLimit={historyLimit}
+        config={config}
+        resumeSessionId={resumeSessionId}
+      />
+    );
+    await waitUntilExit();
+  } finally {
+    cleanup();
+    process.off("exit", onExit);
+    process.off("SIGINT", onSignal);
+    process.off("SIGTERM", onSignal);
+  }
 }
 

@@ -65,32 +65,35 @@ function estimateMsgLines(msg: Message, termWidth: number): number {
   }
 }
 
-/** Returns the slice of messages that fits in viewportRows, respecting scrollLines offset. */
+/** Returns the slice of messages that fits in viewportRows, starting from
+ *  (completed.length - scrollMsgOffset) and walking backward until full.
+ *  One scroll tick = one message boundary, so every tick is instantly visible. */
 function getVisibleMessages(
   messages: Message[],
-  scrollLines: number,
+  scrollMsgOffset: number,
   viewportRows: number,
   termWidth: number
 ): { messages: Message[]; hasMore: boolean } {
-  if (viewportRows <= 0) return { messages: [], hasMore: false };
-  const counts = messages.map((m) => estimateMsgLines(m, termWidth));
-  const totalLines = counts.reduce((a, b) => a + b, 0);
+  if (viewportRows <= 0 || messages.length === 0) return { messages: [], hasMore: false };
 
-  const windowEnd = totalLines - scrollLines;
-  const windowStart = windowEnd - viewportRows;
+  // The "anchor" is the last message shown (scrollMsgOffset from end).
+  const anchorIdx = messages.length - 1 - Math.max(0, scrollMsgOffset);
+  if (anchorIdx < 0) return { messages: [], hasMore: false };
 
-  let acc = 0;
-  const visible: Message[] = [];
-  for (let i = 0; i < messages.length; i++) {
-    const msgStart = acc;
-    const msgEnd = acc + counts[i];
-    if (msgEnd > windowStart && msgStart < windowEnd) {
-      visible.push(messages[i]);
-    }
-    acc = msgEnd;
+  // Walk backward from anchor, accumulating estimated rows until viewport is full.
+  let rowsUsed = 0;
+  let startIdx = anchorIdx;
+  for (let i = anchorIdx; i >= 0; i--) {
+    const est = estimateMsgLines(messages[i], termWidth);
+    if (rowsUsed + est > viewportRows && i < anchorIdx) break;
+    rowsUsed += est;
+    startIdx = i;
   }
 
-  return { messages: visible, hasMore: windowStart > 0 };
+  return {
+    messages: messages.slice(startIdx, anchorIdx + 1),
+    hasMore: startIdx > 0 || scrollMsgOffset > 0,
+  };
 }
 
 function isValidBackend(s: string): s is BackendName {
@@ -127,8 +130,8 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
 
   // All completed messages — rendered in the managed viewport.
   const [completed, setCompleted] = useState<Message[]>([]);
-  // scrollLines: lines scrolled above bottom (0 = pinned to bottom)
-  const [scrollLines, setScrollLines] = useState(0);
+  // scrollMsgOffset: messages hidden from the bottom (0 = pinned to latest).
+  const [scrollMsgOffset, setScrollMsgOffset] = useState(0);
   const atBottomRef = useRef(true);
 
   // Terminal dimensions — updated on resize so layout recalculates.
@@ -224,17 +227,16 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
   const snapToBottom = useCallback(() => {
     scrollAccRef.current = 0;
     atBottomRef.current = true;
-    setScrollLines(0);
+    setScrollMsgOffset(0);
   }, []);
 
   useEffect(() => {
-    const LINES_PER_TICK = 5;
     const handler = (dir: unknown) => {
       if (dir === "up") {
-        scrollAccRef.current += LINES_PER_TICK;
+        scrollAccRef.current += 1;
         atBottomRef.current = false;
       } else {
-        scrollAccRef.current = Math.max(0, scrollAccRef.current - LINES_PER_TICK);
+        scrollAccRef.current = Math.max(0, scrollAccRef.current - 1);
       }
       if (!scrollFlushRef.current) {
         scrollFlushRef.current = true;
@@ -242,7 +244,7 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
           scrollFlushRef.current = false;
           const target = scrollAccRef.current;
           atBottomRef.current = target === 0;
-          setScrollLines(target);
+          setScrollMsgOffset(target);
         });
       }
     };
@@ -804,7 +806,7 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
 
   const { messages: visibleMessages, hasMore } = getVisibleMessages(
     completed,
-    scrollLines,
+    scrollMsgOffset,
     msgViewportRows,
     termWidth
   );

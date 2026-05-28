@@ -1,5 +1,6 @@
 import React, { useState, useRef, useCallback, useEffect } from "react";
 import { render, Box, Text, useApp, useInput } from "ink";
+import { ScrollView, type ScrollViewRef } from "ink-scroll-view";
 import { ConversationHistory } from "./history.js";
 import { buildEnrichedPrompt } from "./enricher.js";
 import { loadMemories } from "../memory/reader.js";
@@ -36,66 +37,6 @@ function makeId(prefix: string) {
 
 const SPINNER = ["|", "/", "-", "\\", "|", "/", "-", "\\", "|", "/"];
 
-/** Estimate how many terminal rows a message will occupy in the viewport. */
-function estimateMsgLines(msg: Message, termWidth: number): number {
-  const contentWidth = Math.max(10, termWidth - 8);
-  switch (msg.role) {
-    case "system":
-      return 2;
-    case "thinking": {
-      const lines = msg.content.split("\n").filter(Boolean);
-      return Math.min(12, lines.length + 4);
-    }
-    case "tool_call": {
-      const hasResult = msg.toolResult !== undefined;
-      if (!hasResult) return 3;
-      const resultLines = (msg.toolResult ?? "").split("\n").filter((l) => l.trim()).slice(0, 5);
-      return 3 + resultLines.length + 1;
-    }
-    default: {
-      // user / assistant
-      const headerLines = 2;
-      const rawLines = msg.content.split("\n");
-      let count = headerLines;
-      for (const line of rawLines) {
-        count += Math.max(1, Math.ceil((line.length || 1) / contentWidth));
-      }
-      return count + 1; // bottom margin
-    }
-  }
-}
-
-/** Returns the slice of messages that fits in viewportRows, starting from
- *  (completed.length - scrollMsgOffset) and walking backward until full.
- *  One scroll tick = one message boundary, so every tick is instantly visible. */
-function getVisibleMessages(
-  messages: Message[],
-  scrollMsgOffset: number,
-  viewportRows: number,
-  termWidth: number
-): { messages: Message[]; hasMore: boolean } {
-  if (viewportRows <= 0 || messages.length === 0) return { messages: [], hasMore: false };
-
-  // The "anchor" is the last message shown (scrollMsgOffset from end).
-  const anchorIdx = messages.length - 1 - Math.max(0, scrollMsgOffset);
-  if (anchorIdx < 0) return { messages: [], hasMore: false };
-
-  // Walk backward from anchor, accumulating estimated rows until viewport is full.
-  let rowsUsed = 0;
-  let startIdx = anchorIdx;
-  for (let i = anchorIdx; i >= 0; i--) {
-    const est = estimateMsgLines(messages[i], termWidth);
-    if (rowsUsed + est > viewportRows && i < anchorIdx) break;
-    rowsUsed += est;
-    startIdx = i;
-  }
-
-  return {
-    messages: messages.slice(startIdx, anchorIdx + 1),
-    hasMore: startIdx > 0 || scrollMsgOffset > 0,
-  };
-}
-
 function isValidBackend(s: string): s is BackendName {
   return s === "claude" || s === "codex" || s === "copilot";
 }
@@ -128,10 +69,9 @@ interface ReplProps {
 function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
   const { exit } = useApp();
 
-  // All completed messages — rendered in the managed viewport.
+  // All completed messages rendered in the ScrollView.
   const [completed, setCompleted] = useState<Message[]>([]);
-  // scrollMsgOffset: messages hidden from the bottom (0 = pinned to latest).
-  const [scrollMsgOffset, setScrollMsgOffset] = useState(0);
+  const scrollRef = useRef<ScrollViewRef>(null);
   const atBottomRef = useRef(true);
 
   // Terminal dimensions — updated on resize so layout recalculates.
@@ -139,8 +79,6 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
     rows: process.stdout.rows ?? 24,
     cols: process.stdout.columns ?? 80,
   });
-
-  // Live area
   const [streamContent, setStreamContent] = useState("");
   const [thinkingChars, setThinkingChars] = useState(0);
   const [thinkingPreview, setThinkingPreview] = useState("");
@@ -208,48 +146,42 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
     return () => clearInterval(t);
   }, [busy]);
 
-  //  terminal resize 
+  //  terminal resize + mouse scroll 
 
   useEffect(() => {
-    const handler = () =>
+    const onResize = () => {
       setTermSize({ rows: process.stdout.rows ?? 24, cols: process.stdout.columns ?? 80 });
-    process.stdout.on("resize", handler);
-    return () => { process.stdout.off("resize", handler); };
+      scrollRef.current?.remeasure();
+    };
+    process.stdout.on("resize", onResize);
+    return () => { process.stdout.off("resize", onResize); };
   }, []);
 
-  //  mouse scroll 
-  // Listen on process.stdin directly (same object, no useEffect dependency churn).
-  // Batch rapid events into one state update per setImmediate tick.
-
-  const scrollAccRef = useRef(0);
-  const scrollFlushRef = useRef(false);
-
-  const snapToBottom = useCallback(() => {
-    scrollAccRef.current = 0;
-    atBottomRef.current = true;
-    setScrollMsgOffset(0);
-  }, []);
-
+  // Mouse scroll — wire directly to ScrollView.scrollBy()
+  // Negative delta = scroll up (reveal older messages).
   useEffect(() => {
     const handler = (dir: unknown) => {
-      if (dir === "up") {
-        scrollAccRef.current += 1;
-        atBottomRef.current = false;
-      } else {
-        scrollAccRef.current = Math.max(0, scrollAccRef.current - 1);
-      }
-      if (!scrollFlushRef.current) {
-        scrollFlushRef.current = true;
+      const delta = dir === "up" ? -3 : 3;
+      if (dir === "up") atBottomRef.current = false;
+      scrollRef.current?.scrollBy(delta);
+      // Check if we scrolled back to bottom
+      if (dir === "down") {
         setImmediate(() => {
-          scrollFlushRef.current = false;
-          const target = scrollAccRef.current;
-          atBottomRef.current = target === 0;
-          setScrollMsgOffset(target);
+          const ref = scrollRef.current;
+          if (ref && ref.getScrollOffset() >= ref.getBottomOffset()) {
+            atBottomRef.current = true;
+          }
         });
       }
     };
     process.stdin.on("mouse_scroll", handler);
     return () => { process.stdin.off("mouse_scroll", handler); };
+  }, []);
+
+
+  const snapToBottom = useCallback(() => {
+    atBottomRef.current = true;
+    scrollRef.current?.scrollToBottom();
   }, []);
 
   //  init 
@@ -778,12 +710,9 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
     ? (sessionRef.current.name ?? sessionRef.current.id.slice(0, 10))
     : "";
 
-  // Use termSize state (updated on resize) so layout re-calculates correctly.
-  const COMPOSER_ROWS = 5;
   const viewportRows = termSize.rows;
-  const termWidth = termSize.cols;
+  const COMPOSER_ROWS = 5;
 
-  // Budget rows for the live area.
   const liveAreaBudget = Math.max(4, viewportRows - COMPOSER_ROWS - 2);
   const thinkingLinesBudget = streamContent ? 0 : Math.floor(liveAreaBudget / 2);
   const streamPreviewLines = streamContent ? liveAreaBudget - 1 : liveAreaBudget - thinkingLinesBudget;
@@ -800,32 +729,29 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
       : null;
 
   const hasLiveArea = isWorking && !!(streamPreview || thinkingLines || thinkingSummary || activeTool);
-  const liveAreaRows = hasLiveArea ? liveAreaBudget : 0;
-  // Message viewport rows: total - composer - live area - 1 (scroll indicator reserve).
-  const msgViewportRows = Math.max(2, viewportRows - COMPOSER_ROWS - liveAreaRows - 1);
-
-  const { messages: visibleMessages, hasMore } = getVisibleMessages(
-    completed,
-    scrollMsgOffset,
-    msgViewportRows,
-    termWidth
-  );
 
   return (
     <Box flexDirection="column" height={viewportRows}>
-      {/*  Message viewport — flexGrow fills available space so composer stays at bottom  */}
-      <Box flexDirection="column" flexGrow={1} overflow="hidden">
-        {visibleMessages.map((msg) => (
+      {/*  Message viewport — ScrollView handles measuring + clipping  */}
+      <ScrollView
+        ref={scrollRef}
+        flexGrow={1}
+        onScroll={(scrollTop) => {
+          const ref = scrollRef.current;
+          if (ref) {
+            atBottomRef.current = scrollTop >= ref.getBottomOffset();
+          }
+        }}
+        onContentHeightChange={() => {
+          if (atBottomRef.current) {
+            scrollRef.current?.scrollToBottom();
+          }
+        }}
+      >
+        {completed.map((msg) => (
           <MessageBubble key={msg.id} message={msg} />
         ))}
-      </Box>
-
-      {/*  Scroll indicator — 1 reserved row  */}
-      <Box paddingLeft={2} height={1}>
-        {hasMore
-          ? <Text dimColor>↑  scroll up for history  (mouse wheel)</Text>
-          : <Text> </Text>}
-      </Box>
+      </ScrollView>
 
       {/*  Live area — streams thinking + response preview while busy  */}
       {hasLiveArea && (

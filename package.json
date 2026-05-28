@@ -20,6 +20,7 @@
     "execa": "^9.5.1",
     "gray-matter": "^4.0.3",
     "ink": "^5.1.0",
+    "ink-scroll-view": "^0.3.7",
     "ink-text-input": "^6.0.0",
     "marked": "^18.0.4",
     "mustache": "^4.2.0",

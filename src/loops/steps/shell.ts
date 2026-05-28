@@ -3,10 +3,18 @@ import { resolveTemplate } from "../../utils/template.js";
 import type { ShellStep } from "../types.js";
 import type { StepContext } from "../runner.js";
 
+export interface ShellStepResult {
+  output: string;
+  resolvedCommand: string;
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+}
+
 export async function runShellStep(
   step: ShellStep,
   context: StepContext
-): Promise<string> {
+): Promise<ShellStepResult> {
   const resolvedCommand = resolveTemplate(step.command, context);
 
   try {
@@ -21,10 +29,22 @@ export async function runShellStep(
       process.stdout.write("\n");
     }
 
-    return output;
+    return {
+      output,
+      resolvedCommand,
+      exitCode: result.exitCode ?? 0,
+      stdout: result.stdout ?? "",
+      stderr: result.stderr ?? "",
+    };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`Shell step error: ${message}`);
-    return message;
+    return {
+      output: message,
+      resolvedCommand,
+      exitCode: 1,
+      stdout: "",
+      stderr: message,
+    };
   }
 }

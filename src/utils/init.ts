@@ -4,6 +4,8 @@ import { join } from "path";
 const GITIGNORE_CONTENT = `memory/*.md
 memory/.index/
 !memory/team/
+sessions/
+audit.jsonl
 config.json
 `;
 
@@ -13,6 +15,7 @@ export function ensureRiteDir(): void {
 
   mkdirSync(join(riteDir, "memory"), { recursive: true });
   mkdirSync(join(riteDir, "loops"), { recursive: true });
+  mkdirSync(join(riteDir, "sessions"), { recursive: true });
 
   if (!alreadyExists) {
     writeFileSync(join(riteDir, ".gitignore"), GITIGNORE_CONTENT, "utf-8");

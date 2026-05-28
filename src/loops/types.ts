@@ -1,3 +1,5 @@
+import type { BackendName } from "../config/types.js";
+
 export type StepType = "llm" | "shell" | "human_input" | "condition";
 
 export interface BaseStep {
@@ -35,6 +37,6 @@ export type Step = LlmStep | ShellStep | HumanInputStep | ConditionStep;
 export interface Loop {
   name: string;
   description?: string;
-  backend?: "claude" | "codex";
+  backend?: BackendName;
   steps: Step[];
 }

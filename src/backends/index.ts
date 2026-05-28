@@ -1,8 +1,10 @@
 import { callClaude } from "./claude.js";
 import { callCodex } from "./codex.js";
-
-export type BackendName = "claude" | "codex";
-export type BackendFn = (prompt: string) => AsyncIterable<string>;
+import { callCopilot } from "./copilot.js";
+import type { BackendName } from "../config/types.js";
+import type { BackendEvent } from "./events.js";
+export type { BackendEvent };
+export type BackendFn = (prompt: string, signal?: AbortSignal) => AsyncIterable<BackendEvent>;
 
 export function getBackend(name: BackendName): BackendFn {
   switch (name) {
@@ -10,6 +12,8 @@ export function getBackend(name: BackendName): BackendFn {
       return callClaude;
     case "codex":
       return callCodex;
+    case "copilot":
+      return callCopilot;
     default: {
       const _exhaustive: never = name;
       throw new Error(`Unknown backend: ${_exhaustive}`);

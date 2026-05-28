@@ -1,9 +1,10 @@
-import Anthropic from "@anthropic-ai/sdk";
 import { existsSync } from "fs";
 import { join } from "path";
 import os from "os";
 import { EXTRACTION_SYSTEM_PROMPT } from "./prompts.js";
 import { createMemory, deleteMemory, updateMemory } from "../memory/writer.js";
+import { appendAuditEvent } from "../audit/writer.js";
+import { callUtilityBlocking } from "../backends/utility.js";
 import type { MemoryType, InjectMode, Priority } from "../memory/types.js";
 import type { RiteConfig } from "../config/types.js";
 
@@ -30,29 +31,36 @@ export async function extractMemories(
   userMessage: string,
   assistantResponse: string,
   config: RiteConfig,
-  onSaved?: (count: number) => void
+  onSaved?: (count: number) => void,
+  sessionId = ""
 ): Promise<void> {
+  const auditData: {
+    userMessage: string;
+    assistantResponse: string;
+    rawLlmResponse: string;
+    operations: ExtractionOperation[];
+    applied: string[];
+    failed: string[];
+  } = {
+    userMessage,
+    assistantResponse,
+    rawLlmResponse: "",
+    operations: [],
+    applied: [],
+    failed: [],
+  };
+
   try {
-    const apiKey =
-      process.env.ANTHROPIC_API_KEY ?? config.anthropicApiKey ?? "";
-    if (!apiKey) return;
+    const rawText = await callUtilityBlocking(
+      `User: ${userMessage}\n\nAssistant: ${assistantResponse}`,
+      config,
+      {
+        systemPrompt: EXTRACTION_SYSTEM_PROMPT,
+        maxTokens: 1024,
+      }
+    );
 
-    const client = new Anthropic({ apiKey });
-
-    const response = await client.messages.create({
-      model: "claude-haiku-4-5-20251001",
-      max_tokens: 1024,
-      system: EXTRACTION_SYSTEM_PROMPT,
-      messages: [
-        {
-          role: "user",
-          content: `User: ${userMessage}\n\nAssistant: ${assistantResponse}`,
-        },
-      ],
-    });
-
-    const rawText =
-      response.content[0]?.type === "text" ? response.content[0].text : "";
+    auditData.rawLlmResponse = rawText;
     if (!rawText.trim()) return;
 
     let operations: ExtractionOperation[];
@@ -63,6 +71,7 @@ export async function extractMemories(
       return;
     }
 
+    auditData.operations = operations;
     let savedCount = 0;
 
     for (const op of operations) {
@@ -82,6 +91,7 @@ export async function extractMemories(
             op.body,
             "project"
           );
+          auditData.applied.push(`create:${op.name}`);
           savedCount++;
         } else if (op.action === "update") {
           if (!op.body) continue;
@@ -96,13 +106,17 @@ export async function extractMemories(
             op.body,
             memoryFileExists(op.name, "global") ? "global" : "project"
           );
+          auditData.applied.push(`update:${op.name}`);
           savedCount++;
         } else if (op.action === "delete") {
           deleteMemory(op.name);
+          auditData.applied.push(`delete:${op.name}`);
           savedCount++;
         }
-      } catch {
-        // swallow per-operation errors silently
+      } catch (err) {
+        auditData.failed.push(
+          `${op.action}:${op.name} — ${err instanceof Error ? err.message : String(err)}`
+        );
       }
     }
 
@@ -111,5 +125,9 @@ export async function extractMemories(
     }
   } catch {
     // swallow all errors — extraction must never crash the REPL
+  } finally {
+    if (auditData.rawLlmResponse || auditData.operations.length > 0) {
+      appendAuditEvent(sessionId, "memory_extraction", auditData);
+    }
   }
 }

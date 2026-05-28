@@ -1,16 +1,18 @@
-import Anthropic from "@anthropic-ai/sdk";
+import { callUtilityBlocking } from "../../backends/utility.js";
 import type { ConditionStep } from "../types.js";
 import type { StepContext } from "../runner.js";
+
+export interface ConditionStepResult {
+  output: "true" | "false";
+  rawResponse: string;
+  question: string;
+}
 
 export async function runConditionStep(
   step: ConditionStep,
   context: StepContext
-): Promise<"true" | "false"> {
+): Promise<ConditionStepResult> {
   try {
-    const apiKey =
-      process.env.ANTHROPIC_API_KEY ?? context.config.anthropicApiKey ?? "";
-    if (!apiKey) return "false";
-
     const stepIds = Object.keys(context.stepOutputs);
     const lastStepId = stepIds[stepIds.length - 1];
     const recentOutput =
@@ -18,7 +20,7 @@ export async function runConditionStep(
         ? context.stepOutputs[lastStepId]
         : context.context;
 
-    const promptText = [
+    const question = [
       "Previous step context:",
       recentOutput,
       "",
@@ -27,20 +29,13 @@ export async function runConditionStep(
       "Respond with only: true or false",
     ].join("\n");
 
-    const client = new Anthropic({ apiKey });
-    const response = await client.messages.create({
-      model: "claude-haiku-4-5-20251001",
-      max_tokens: 10,
-      messages: [{ role: "user", content: promptText }],
+    const rawResponse = await callUtilityBlocking(question, context.config, {
+      maxTokens: 10,
     });
-
-    const text =
-      response.content[0]?.type === "text"
-        ? response.content[0].text.toLowerCase().trim()
-        : "";
-
-    return text.includes("true") ? "true" : "false";
+    const normalized = rawResponse.toLowerCase().trim();
+    const output = normalized.includes("true") ? "true" : "false";
+    return { output, rawResponse: normalized, question };
   } catch {
-    return "false";
+    return { output: "false", rawResponse: "", question: step.prompt };
   }
 }

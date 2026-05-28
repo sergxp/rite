@@ -8,8 +8,17 @@ import { existsSync } from "fs";
 import { join } from "path";
 import os from "os";
 import { execSync } from "child_process";
-import { readFileSync, writeFileSync } from "fs";
+import { readFileSync } from "fs";
+import * as readline from "readline";
 import { loadLoops, findLoop, registerLoop } from "./loops/registry.js";
+import { setBackend, parseBackendTarget } from "./settings/backends.js";
+import type { BackendName } from "./config/types.js";
+import {
+  listSessions,
+  findSession,
+  renameSession,
+  deleteSession,
+} from "./sessions/store.js";
 
 const program = new Command();
 
@@ -193,39 +202,51 @@ program
   .description("Manage backend settings")
   .addCommand(
     new Command("set")
-      .argument("<name>", "Backend name: claude | codex")
-      .description("Set the active backend")
-      .action(async (name: string) => {
-        if (name !== "claude" && name !== "codex") {
-          console.error(
-            `Invalid backend: ${name}. Valid options: claude, codex`
-          );
-          process.exit(1);
-        }
+      .argument("[targetOrBackend]", "assistant | utility | claude | codex")
+      .argument("[backendName]", "Backend name: claude | codex")
+      .description("Set a backend in the project config")
+      .action(
+        async (
+          targetOrBackend: string | undefined,
+          backendName?: string
+        ) => {
+          const target = parseBackendTarget(targetOrBackend ?? "");
+          const resolvedTarget = backendName ? target : "assistant";
+          const resolvedBackend = (backendName ?? targetOrBackend) as
+            | BackendName
+            | undefined;
 
-        ensureRiteDir();
-
-        const projectConfigPath = join(process.cwd(), ".rite", "config.json");
-        let existing: Record<string, unknown> = {};
-        if (existsSync(projectConfigPath)) {
-          try {
-            existing = JSON.parse(
-              readFileSync(projectConfigPath, "utf-8")
-            ) as Record<string, unknown>;
-          } catch {
-            existing = {};
+          if (
+            !resolvedBackend ||
+            (resolvedBackend !== "claude" && resolvedBackend !== "codex" && resolvedBackend !== "copilot")
+          ) {
+            console.error(
+              `Invalid backend: ${resolvedBackend ?? "<missing>"}. Valid options: claude, codex, copilot`
+            );
+            process.exit(1);
           }
+
+          if (backendName && !resolvedTarget) {
+            console.error(
+              `Invalid target: ${targetOrBackend}. Valid options: assistant, utility`
+            );
+            process.exit(1);
+          }
+
+          ensureRiteDir();
+          const next = setBackend(resolvedTarget ?? "assistant", resolvedBackend);
+          console.log(
+            `Updated ${resolvedTarget ?? "assistant"} backend to ${resolvedBackend}. Current settings: assistant=${next.backend}, utility=${next.utilityBackend}`
+          );
         }
-
-        existing.backend = name;
-        writeFileSync(
-          projectConfigPath,
-          JSON.stringify(existing, null, 2),
-          "utf-8"
-        );
-
-        console.log(`Backend set to: ${name}`);
-      })
+      )
+  )
+  .addCommand(
+    new Command("show").description("Show backend settings").action(async () => {
+      const config = await loadConfig();
+      console.log(`assistant: ${config.backend}`);
+      console.log(`utility:   ${config.utilityBackend}`);
+    })
   );
 
 // ---- loop command ----
@@ -306,6 +327,99 @@ loops
       );
       process.exit(1);
     }
+  });
+
+// ---- session commands ----
+const session = program.command("session").description("Manage sessions");
+
+session
+  .command("list")
+  .description("List all sessions for this project")
+  .action(() => {
+    ensureRiteDir();
+    const sessions = listSessions();
+    if (sessions.length === 0) {
+      console.log("No sessions found.");
+      return;
+    }
+    console.log(`\n${sessions.length} session(s):\n`);
+    const idW = 20;
+    const nameW = 20;
+    const typeW = 14;
+    const dateW = 12;
+    const pad = (s: string, n: number) => s.padEnd(n);
+    console.log(
+      `  ${pad("id", idW)}  ${pad("name", nameW)}  ${pad("type", typeW)}  ${pad("date", dateW)}  turns`
+    );
+    console.log("  " + "-".repeat(idW + nameW + typeW + dateW + 14));
+    for (const s of sessions) {
+      const name = s.name ?? "";
+      const typeLabel =
+        s.type === "loop" ? `loop:${s.loopName ?? "?"}` : "repl";
+      const date = new Date(s.createdAt).toLocaleDateString();
+      console.log(
+        `  ${pad(s.id, idW)}  ${pad(name, nameW)}  ${pad(typeLabel, typeW)}  ${pad(date, dateW)}  ${s.turns.length}`
+      );
+    }
+    console.log();
+  });
+
+session
+  .command("resume <id>")
+  .description("Resume a session by id or name")
+  .action(async (id: string) => {
+    ensureRiteDir();
+    const found = findSession(id);
+    if (!found) {
+      console.error(`Session not found: ${id}`);
+      process.exit(1);
+    }
+    const config = await loadConfig();
+    const { startRepl } = await import("./repl/index.js");
+    await startRepl(config.backend, config.historyLimit, config, found.id);
+  });
+
+session
+  .command("rename <id> <name>")
+  .description("Rename a session")
+  .action((id: string, name: string) => {
+    ensureRiteDir();
+    const found = findSession(id);
+    if (!found) {
+      console.error(`Session not found: ${id}`);
+      process.exit(1);
+    }
+    renameSession(found.id, name);
+    console.log(`Session renamed: ${found.id} → ${name}`);
+  });
+
+session
+  .command("delete <id>")
+  .description("Delete a session")
+  .action(async (id: string) => {
+    ensureRiteDir();
+    const found = findSession(id);
+    if (!found) {
+      console.error(`Session not found: ${id}`);
+      process.exit(1);
+    }
+    const label = found.name ?? found.id;
+    const confirmed = await new Promise<boolean>((resolve) => {
+      const rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout,
+      });
+      rl.question(`Delete session "${label}"? [y/N] `, (answer) => {
+        rl.close();
+        resolve(answer.toLowerCase() === "y");
+      });
+    });
+    if (!confirmed) {
+      console.log("Cancelled.");
+      return;
+    }
+    deleteSession(found.id);
+    console.log(`Session deleted: ${label}`);
   });
 
 program.parseAsync(process.argv).catch((err: unknown) => {

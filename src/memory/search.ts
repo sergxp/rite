@@ -18,10 +18,10 @@ export async function searchMemories(query: string): Promise<MemoryFile[]> {
   const seen = new Set<string>(keywordResults.map((m) => m.filePath));
   const merged = [...keywordResults];
 
-  for (const m of semanticResults) {
-    if (!seen.has(m.filePath)) {
-      merged.push(m);
-      seen.add(m.filePath);
+  for (const { file } of semanticResults) {
+    if (!seen.has(file.filePath)) {
+      merged.push(file);
+      seen.add(file.filePath);
     }
   }
 

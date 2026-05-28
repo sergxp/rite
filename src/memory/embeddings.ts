@@ -122,7 +122,7 @@ export async function semanticSearch(
   query: string,
   candidates: MemoryFile[],
   topN = 5
-): Promise<MemoryFile[]> {
+): Promise<Array<{ file: MemoryFile; score: number }>> {
   try {
     const queryVector = await embedText(query);
 
@@ -140,9 +140,9 @@ export async function semanticSearch(
     }
 
     scored.sort((a, b) => b.score - a.score);
-    return scored.slice(0, topN).map((s) => s.file);
+    return scored.slice(0, topN);
   } catch {
     // pipeline failed — degrade gracefully
-    return candidates.slice(0, topN);
+    return candidates.slice(0, topN).map((file) => ({ file, score: 0 }));
   }
 }

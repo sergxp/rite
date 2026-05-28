@@ -243,6 +243,7 @@ Rite merges config from two locations, with project config taking precedence:
 ```json
 {
   "backend": "claude",
+  "utilityBackend": "claude",
   "historyLimit": 20,
   "tokenBudget": 8000,
   "anthropicApiKey": ""
@@ -251,16 +252,19 @@ Rite merges config from two locations, with project config taking precedence:
 
 | Option | Default | Description |
 |---|---|---|
-| `backend` | `claude` | Active backend: `claude` or `codex` |
+| `backend` | `claude` | Main assistant backend: `claude` or `codex` |
+| `utilityBackend` | `claude` | Backend for extraction, compression, and loop conditions |
 | `historyLimit` | `20` | Max conversation turns kept in rolling history |
 | `tokenBudget` | `8000` | Token estimate threshold that triggers history compression |
 | `anthropicApiKey` | `""` | Fallback if `ANTHROPIC_API_KEY` env var is not set |
 
-Switch backend from the CLI:
+Switch backends from the CLI:
 
 ```bash
 rite backend set codex
-rite backend set claude
+rite backend set utility codex
+rite backend set assistant claude
+rite backend show
 ```
 
 ---
@@ -282,6 +286,7 @@ Type these directly in the REPL input:
 | `/clear` | Reset conversation history |
 | `/compact` | Manually trigger history summarization |
 | `/memory` | Show all currently loaded memories |
+| `/backend <assistant\|utility> <claude\|codex>` | Switch a backend from inside the REPL |
 | `/loop <name>` | Run a loop from within the REPL |
 
 ### Status bar indicators

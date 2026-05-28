@@ -461,6 +461,7 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
       let fullResponse = "";
       let finishedTools: string[] = [];
       let cancelled = false;
+      let writeAfterCollapse: (() => void) | null = null;
       thinkingRef.current = { chars: 0, text: "" };
       try {
         const backendFn = getBackend(assistantBackend);
@@ -515,9 +516,9 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
           saveSession(s);
         }
 
-        // Write the completed response directly to stdout BEFORE collapsing the live area.
-        // This avoids Ink's Static cursor-dance bug that clips tall messages.
-        write(renderAssistantAnsi(fullResponse));
+        // Defer write until after setBusy(false) so Ink collapses the live area
+        // before writing to stdout — prevents the status bar from appearing twice.
+        writeAfterCollapse = () => write(renderAssistantAnsi(fullResponse));
 
         await compressHistoryIfNeeded(histRef.current, runtimeConfig);
 
@@ -539,15 +540,15 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
           cancelled = true;
           // Show whatever partial text was received before the cancel
           if (fullResponse.trim()) {
-            write(renderAssistantAnsi(fullResponse + "\n\n*[cancelled]*"));
+            writeAfterCollapse = () => write(renderAssistantAnsi(fullResponse + "\n\n*[cancelled]*"));
             histRef.current.add("user", trimmed);
             histRef.current.add("assistant", fullResponse);
           } else {
-            write(renderSystemAnsi("Cancelled."));
+            writeAfterCollapse = () => write(renderSystemAnsi("Cancelled."));
           }
         } else {
           const msg = err instanceof Error ? err.message : String(err);
-          write(renderSystemAnsi(`Error: ${msg}`));
+          writeAfterCollapse = () => write(renderSystemAnsi(`Error: ${msg}`));
         }
       } finally {
         abortControllerRef.current = null;
@@ -556,6 +557,10 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
         liveRef.current = "";
         setActiveTool(null);
         if (cancelled) setToolsSeen([]);
+        // Defer write until after Ink re-renders with the live area collapsed,
+        // preventing a stale Composer render from remaining on screen.
+        const pendingWrite = writeAfterCollapse;
+        if (pendingWrite) setImmediate(pendingWrite);
       }
     },
     [

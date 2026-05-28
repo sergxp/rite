@@ -36,8 +36,6 @@ function makeId(prefix: string) {
 
 const SPINNER = ["|", "/", "-", "\\", "|", "/", "-", "\\", "|", "/"];
 
-const SCROLL_STEP = 3; // lines per mouse-wheel tick
-
 // Estimate how many terminal rows a message will occupy (rough but good enough).
 function estimateMsgLines(msg: Message, termWidth: number): number {
   const content = msg.content || "";
@@ -50,25 +48,20 @@ function estimateMsgLines(msg: Message, termWidth: number): number {
 }
 
 // Return the slice of completed messages that fits in viewportHeight lines,
-// after skipping scrollLines from the end (0 = show latest).
+// skipping scrollMsgs messages from the bottom (0 = show latest).
+// Using message-count scroll (not lines) gives 1-message-per-tick precision.
 function getVisibleMessages(
   completed: Message[],
-  scrollLines: number,
+  scrollMsgs: number,
   viewportHeight: number,
   termWidth: number
 ): { messages: Message[]; hasMore: boolean } {
   if (completed.length === 0) return { messages: [], hasMore: false };
 
-  // Phase 1: skip scrollLines worth of lines from the bottom.
-  let skipped = 0;
-  let endIdx = completed.length;
-  for (let i = completed.length - 1; i >= 0 && skipped < scrollLines; i--) {
-    const n = estimateMsgLines(completed[i], termWidth);
-    skipped += n;
-    endIdx = i;
-  }
+  // endIdx: skip scrollMsgs messages from the bottom.
+  const endIdx = Math.max(0, completed.length - scrollMsgs);
 
-  // Phase 2: fill viewportHeight lines going backwards from endIdx.
+  // Walk backwards from endIdx, fitting as many messages as possible.
   let shown = 0;
   let startIdx = endIdx;
   for (let i = endIdx - 1; i >= 0; i--) {
@@ -118,7 +111,7 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
 
   // Completed messages (all rendered via React, no write() to stdout).
   const [completed, setCompleted] = useState<Message[]>([]);
-  const [scrollOffset, setScrollOffset] = useState(0); // lines scrolled up from bottom
+  const [scrollOffset, setScrollOffset] = useState(0); // messages hidden from the bottom (0=latest)
   const atBottomRef = useRef(true); // true when the user hasn't manually scrolled up
 
   // Live area
@@ -239,6 +232,10 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
     setCompleted((prev) => [...prev, msg]);
   }, []);
 
+  const updateCompleted = useCallback((id: string, patch: Partial<Message>) => {
+    setCompleted((prev) => prev.map((m) => m.id === id ? { ...m, ...patch } : m));
+  }, []);
+
   const refreshMemories = useCallback(() => {
     const loaded = loadMemories();
     setAlwaysMemories(loaded.always);
@@ -309,31 +306,25 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
     }
   });
 
-  //  mouse scroll handler 
+  //  mouse scroll handler (custom event emitted by startRepl's stdin patch) 
 
   const { stdin } = useStdin();
   useEffect(() => {
     if (!stdin) return;
-    const handler = (chunk: Buffer | string) => {
-      const str = typeof chunk === "string" ? chunk : chunk.toString("binary");
-      // SGR mouse protocol: ESC[<code;x;yM — code 64=scroll-up, 65=scroll-down
-      const match = str.match(/\x1b\[<(\d+);\d+;\d+M/);
-      if (match) {
-        const code = parseInt(match[1], 10);
-        if (code === 64) {
-          setScrollOffset((prev) => prev + SCROLL_STEP);
-          atBottomRef.current = false;
-        } else if (code === 65) {
-          setScrollOffset((prev) => {
-            const next = Math.max(0, prev - SCROLL_STEP);
-            atBottomRef.current = next === 0;
-            return next;
-          });
-        }
+    const handler = (direction: "up" | "down") => {
+      if (direction === "up") {
+        setScrollOffset((prev) => prev + 1);
+        atBottomRef.current = false;
+      } else {
+        setScrollOffset((prev) => {
+          const next = Math.max(0, prev - 1);
+          atBottomRef.current = next === 0;
+          return next;
+        });
       }
     };
-    stdin.on("data", handler);
-    return () => { stdin.off("data", handler); };
+    (stdin as NodeJS.EventEmitter).on("mouse_scroll", handler);
+    return () => { (stdin as NodeJS.EventEmitter).off("mouse_scroll", handler); };
   }, [stdin]);
 
   //  submit handler 
@@ -560,8 +551,8 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
       let completedMsg: Message | null = null;
       // Track current thinking block — emitted to completed when the block ends.
       let pendingThinkingText = "";
-      // Hold tool calls until we have the result (then emit as one message).
-      const pendingToolCalls = new Map<string, { name: string; inputJson: string; startedAt: number }>();
+      // Track in-flight tool calls: id → { msgId, name, inputJson, startedAt }
+      const pendingToolCalls = new Map<string, { msgId: string; name: string; inputJson: string; startedAt: number }>();
       thinkingRef.current = { chars: 0, text: "" };
 
       /** Flush the current thinking block to completed and reset live tracking. */
@@ -587,22 +578,28 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
           } else if (event.type === "tool_call") {
             // Thinking block ends when a tool call starts.
             flushThinking();
-            pendingToolCalls.set(event.id, { name: event.name, inputJson: "", startedAt: Date.now() });
+            const msgId = makeId("tool");
+            // Add immediately so the tool call appears in the viewport right away.
+            addCompleted({
+              id: msgId,
+              role: "tool_call",
+              content: event.name,
+              toolName: event.name,
+            });
+            pendingToolCalls.set(event.id, { msgId, name: event.name, inputJson: "", startedAt: Date.now() });
             setActiveTool(event.name);
           } else if (event.type === "tool_done") {
-            // Update inputJson; keep pending until tool_result arrives.
             const pending = pendingToolCalls.get(event.id);
-            if (pending) pending.inputJson = event.inputJson ?? "";
+            if (pending) {
+              pending.inputJson = event.inputJson ?? "";
+              updateCompleted(pending.msgId, { toolInputJson: pending.inputJson });
+            }
             setActiveTool(null);
           } else if (event.type === "tool_result") {
             const pending = pendingToolCalls.get(event.id);
             if (pending) {
               pendingToolCalls.delete(event.id);
-              addCompleted({
-                id: makeId("tool"),
-                role: "tool_call",
-                content: pending.name,
-                toolName: pending.name,
+              updateCompleted(pending.msgId, {
                 toolInputJson: pending.inputJson,
                 toolResult: event.result,
                 toolIsError: event.isError,
@@ -691,13 +688,9 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
         }
       } finally {
         abortControllerRef.current = null;
-        // Flush any tool calls that never got a result (e.g. on cancel/error).
+        // Patch any tool calls that never got a result (already in completed, just missing result).
         for (const [, pending] of pendingToolCalls) {
-          addCompleted({
-            id: makeId("tool"),
-            role: "tool_call",
-            content: pending.name,
-            toolName: pending.name,
+          updateCompleted(pending.msgId, {
             toolInputJson: pending.inputJson,
             durationMs: Date.now() - pending.startedAt,
           });
@@ -718,6 +711,7 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
       refreshMemories,
       persistBackend,
       addCompleted,
+      updateCompleted,
       exit,
     ]
   );
@@ -847,18 +841,20 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
               </Text>
             </Box>
           )}
-          {/* Active tool spinner or stream preview */}
-          {(activeTool || streamPreview) && (
+          {/* Active tool indicator (shown independently of text preview) */}
+          {activeTool && (
             <Box paddingLeft={3}>
-              {streamPreview ? (
-                <Text wrap="wrap" color="gray" dimColor>
-                  {streamPreview}
-                </Text>
-              ) : (
-                <Text dimColor>
-                  {SPINNER[spinnerFrame]} tool: {activeTool}
-                </Text>
-              )}
+              <Text dimColor>
+                {SPINNER[spinnerFrame]} {activeTool}
+              </Text>
+            </Box>
+          )}
+          {/* Stream preview */}
+          {streamPreview && (
+            <Box paddingLeft={3}>
+              <Text wrap="wrap" color="gray" dimColor>
+                {streamPreview}
+              </Text>
             </Box>
           )}
         </Box>
@@ -901,6 +897,36 @@ export async function startRepl(
   // Enable SGR mouse reporting so scroll-wheel events arrive as mouse sequences
   // instead of being converted to up/down arrow keys.
   process.stdout.write(MOUSE_ENTER);
+
+  // Patch stdin.emit BEFORE render() so Ink never sees raw SGR mouse bytes.
+  // Without this, Ink's text input receives the escape sequences as typed text.
+  // We strip all SGR mouse sequences from 'data' events and re-emit them as
+  // a custom 'mouse_scroll' event that the Repl component can listen for safely.
+  const SGR_MOUSE_RE = /\x1b\[<\d+;\d+;\d+[Mm]/g;
+  const origEmit = (process.stdin as NodeJS.EventEmitter).emit.bind(process.stdin);
+  (process.stdin as NodeJS.EventEmitter).emit = function (
+    event: string,
+    ...args: unknown[]
+  ): boolean {
+    if (event === "data") {
+      const chunk = args[0] as Buffer | string;
+      const str = Buffer.isBuffer(chunk) ? chunk.toString("binary") : String(chunk);
+      // Fire custom events for scroll-up (64) and scroll-down (65) sequences.
+      for (const m of str.matchAll(/\x1b\[<(\d+);\d+;\d+M/g)) {
+        const code = parseInt(m[1], 10);
+        if (code === 64) origEmit("mouse_scroll", "up");
+        else if (code === 65) origEmit("mouse_scroll", "down");
+      }
+      // Strip ALL SGR mouse sequences so they never reach Ink's key parser.
+      const filtered = str.replace(SGR_MOUSE_RE, "");
+      if (filtered !== str) {
+        if (!filtered) return false;
+        const out = Buffer.isBuffer(chunk) ? Buffer.from(filtered, "binary") : filtered;
+        return origEmit("data", out);
+      }
+    }
+    return origEmit(event, ...args);
+  } as typeof process.stdin.emit;
 
   const cleanup = () => {
     process.stdout.write(MOUSE_EXIT);

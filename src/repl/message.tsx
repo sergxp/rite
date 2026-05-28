@@ -128,12 +128,13 @@ function ToolCallBubble({
   durationMs?: number;
 }) {
   const detail = toolInputJson ? toolInputSummary(toolName, toolInputJson) : "";
+  const isPending = toolResult === undefined;
   const duration = durationMs !== undefined ? ` (${durationMs}ms)` : "";
-  const statusColor = toolIsError ? "red" : "cyan";
-  const statusIcon = toolIsError ? "✗" : "✓";
+  const statusColor = isPending ? "gray" : toolIsError ? "red" : "cyan";
+  const statusIcon = isPending ? "…" : toolIsError ? "✗" : "✓";
 
   return (
-    <Box flexDirection="column" marginBottom={toolResult ? 0 : 1}>
+    <Box flexDirection="column" marginBottom={1}>
       <Box paddingLeft={2}>
         <Text dimColor>⚙ </Text>
         <Text color="cyanBright" bold dimColor>{toolName}</Text>

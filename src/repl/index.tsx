@@ -87,7 +87,6 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
   const [spinnerFrame, setSpinnerFrame] = useState(0);
   // Tool call tracking for live display
   const [activeTool, setActiveTool] = useState<string | null>(null);
-  const [toolsSeen, setToolsSeen] = useState<string[]>([]);
 
   // Input
   const [input, setInput] = useState("");
@@ -483,27 +482,55 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
       );
 
       let fullResponse = "";
-      let finishedTools: string[] = [];
       let cancelled = false;
       let writeAfterCollapse: (() => void) | null = null;
+      // Track current thinking block — emitted to Static when the block ends.
+      let pendingThinkingText = "";
+      // Track per-tool start times for duration display.
+      const toolStartTimes = new Map<string, number>();
       thinkingRef.current = { chars: 0, text: "" };
+
+      /** Flush the current thinking block to Static and reset live tracking. */
+      const flushThinking = () => {
+        if (!pendingThinkingText.trim()) return;
+        addCompleted({ id: makeId("think"), role: "thinking", content: pendingThinkingText });
+        pendingThinkingText = "";
+        thinkingRef.current = { chars: 0, text: "" };
+      };
+
       try {
         const backendFn = getBackend(assistantBackend);
         for await (const event of backendFn(enriched, abortController.signal)) {
           if (event.type === "text") {
+            // Thinking block ends when response text begins.
+            flushThinking();
             fullResponse += event.content;
             liveRef.current = fullResponse;
           } else if (event.type === "thinking") {
+            pendingThinkingText += event.content;
             thinkingRef.current.chars += event.content.length;
-            thinkingRef.current.text += event.content;
+            thinkingRef.current.text = pendingThinkingText;
           } else if (event.type === "tool_call") {
+            // Thinking block ends when a tool call starts.
+            flushThinking();
+            toolStartTimes.set(event.id, Date.now());
             setActiveTool(event.name);
           } else if (event.type === "tool_done") {
-            finishedTools = [...finishedTools, event.name];
-            setToolsSeen(finishedTools);
+            const startedAt = toolStartTimes.get(event.id) ?? Date.now();
+            toolStartTimes.delete(event.id);
+            addCompleted({
+              id: makeId("tool"),
+              role: "tool_call",
+              content: event.name,
+              toolName: event.name,
+              durationMs: Date.now() - startedAt,
+            });
             setActiveTool(null);
           }
         }
+
+        // Flush any trailing thinking block (e.g. model thought then gave no text).
+        flushThinking();
 
         if (!fullResponse.trim()) {
           throw new Error(
@@ -580,7 +607,6 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
         setStreamContent("");
         liveRef.current = "";
         setActiveTool(null);
-        if (cancelled) setToolsSeen([]);
         // Defer write until after Ink re-renders with the live area collapsed,
         // preventing a stale Composer render from remaining on screen.
         const pendingWrite = writeAfterCollapse;
@@ -642,12 +668,11 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
 
   // Composer takes ~5 rows (status + border-top + input + border-bottom + hints).
   const COMPOSER_ROWS = 5;
-  const toolHistoryRow = toolsSeen.length > 0 ? 1 : 0;
   const viewportRows = process.stdout.rows ?? 24;
   // Budget rows for the live area. When thinking is active (no response text yet),
   // split the budget: up to half for thinking lines, rest for margin/chrome.
   // Once response text arrives, collapse thinking to 1 summary line.
-  const liveAreaBudget = Math.max(4, viewportRows - COMPOSER_ROWS - 2 - toolHistoryRow);
+  const liveAreaBudget = Math.max(4, viewportRows - COMPOSER_ROWS - 2);
   const thinkingLinesBudget = streamContent ? 0 : Math.floor(liveAreaBudget / 2);
   const streamPreviewLines = streamContent
     ? liveAreaBudget - 1  // 1 row reserved for collapsed thinking summary if present
@@ -676,8 +701,9 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
 
       {/*  Live: shown while busy with content to display.
            Thinking streams as capped live lines; once response text arrives it
-           collapses to a 1-line summary so the live area never overflows the viewport.  */}
-      {isWorking && (streamPreview || thinkingLines || thinkingSummary || activeTool || toolsSeen.length > 0) && (
+           collapses to a 1-line summary so the live area never overflows the viewport.
+           Completed tool calls and thinking blocks land in <Static> above.  */}
+      {isWorking && (streamPreview || thinkingLines || thinkingSummary || activeTool) && (
         <Box flexDirection="column" marginBottom={1} flexShrink={0}>
           <Box paddingLeft={1}>
             <Text color="greenBright" bold>
@@ -700,15 +726,7 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
               </Text>
             </Box>
           )}
-          {/* Tool history: dim list of completed tool calls */}
-          {toolsSeen.length > 0 && (
-            <Box paddingLeft={3}>
-              <Text dimColor>
-                {"ran: " + toolsSeen.join(", ")}
-              </Text>
-            </Box>
-          )}
-          {/* Active tool or stream preview */}
+          {/* Active tool spinner or stream preview */}
           {(activeTool || streamPreview) && (
             <Box paddingLeft={3}>
               {streamPreview ? (

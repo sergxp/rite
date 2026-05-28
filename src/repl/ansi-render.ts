@@ -22,6 +22,46 @@ const MAGENTA_BRIGHT = "\x1b[95m";
 
 const INDENT = "   "; // 3 spaces = paddingLeft={3}
 
+/** Strip ANSI escape codes to measure visible character width */
+function visLen(s: string): number {
+  // eslint-disable-next-line no-control-regex
+  return s.replace(/\x1b\[[0-9;]*m/g, "").length;
+}
+
+/**
+ * Word-wrap ANSI-annotated text so it never exceeds termWidth columns.
+ * The first line is returned without a leading indent (caller adds it).
+ * Continuation lines are prefixed with `indent`.
+ */
+function wrapAnsi(text: string, indent: string): string {
+  const termWidth = (process.stdout.columns ?? 80) - 2; // 2-col safety margin
+  const maxWidth = termWidth - visLen(indent);
+  if (maxWidth < 20) return text; // too narrow to wrap sensibly
+
+  // Split on whitespace runs, keeping them as tokens so we can reassemble
+  const tokens = text.split(/(\s+)/);
+  const lines: string[] = [];
+  let line = "";
+  let lineVis = 0;
+
+  for (const token of tokens) {
+    const tokenVis = visLen(token);
+    if (lineVis + tokenVis > maxWidth && lineVis > 0) {
+      lines.push(line);
+      // Trim leading whitespace for the new line
+      const trimmed = token.replace(/^\s+/, "");
+      line = trimmed;
+      lineVis = visLen(trimmed);
+    } else {
+      line += token;
+      lineVis += tokenVis;
+    }
+  }
+  if (line) lines.push(line);
+
+  return lines.join(`\n${indent}`);
+}
+
 const HEADING_COLORS = [
   GREEN_BRIGHT,
   CYAN_BRIGHT,
@@ -117,22 +157,22 @@ function blk(tokens: BT[], indent = INDENT): string {
 
       case "paragraph":
         parts.push(
-          `${indent}${WHITE_BRIGHT}${inl(t.tokens as IT[])}${R}`
+          `${indent}${wrapAnsi(`${WHITE_BRIGHT}${inl(t.tokens as IT[])}${R}`, indent)}`
         );
         break;
 
       case "text":
         parts.push(
-          `${indent}${WHITE_BRIGHT}${
+          `${indent}${wrapAnsi(`${WHITE_BRIGHT}${
             t.tokens?.length ? inl(t.tokens as IT[]) : (t.text ?? "")
-          }${R}`
+          }${R}`, indent)}`
         );
         break;
 
       case "heading": {
         const color = HEADING_COLORS[Math.min((t.depth ?? 1) - 1, 5)];
         parts.push(
-          `${indent}${BOLD}${color}${inl(t.tokens as IT[])}${R}`
+          `${indent}${wrapAnsi(`${BOLD}${color}${inl(t.tokens as IT[])}${R}`, indent)}`
         );
         break;
       }
@@ -174,7 +214,9 @@ function blk(tokens: BT[], indent = INDENT): string {
             : item.text ?? "";
 
           const lines = innerContent.trim().split("\n");
-          const firstLine = `${indent}${CYAN_BRIGHT}${BOLD}${bullet}${R} ${WHITE_BRIGHT}${lines[0] ?? ""}${R}`;
+          const itemIndent = `${indent}  `;
+          const firstLineContent = wrapAnsi(`${WHITE_BRIGHT}${lines[0] ?? ""}${R}`, itemIndent);
+          const firstLine = `${indent}${CYAN_BRIGHT}${BOLD}${bullet}${R} ${firstLineContent}`;
           const restLines = lines
             .slice(1)
             .map((l) => `${indent}  ${l}`)

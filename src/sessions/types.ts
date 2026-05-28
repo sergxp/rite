@@ -2,7 +2,7 @@ import type { BackendName } from "../config/types.js";
 
 export interface SessionMemoryRef {
   name: string;
-  tier: "global" | "project";
+  tier: "global" | "workspace" | "project";
   inject: "always" | "semantic" | "never";
 }
 

@@ -13,6 +13,7 @@ import {
   loadSession,
   listSessions,
 } from "../sessions/store.js";
+import { autoNameSession } from "../sessions/namer.js";
 import { SessionPicker } from "../sessions/picker.js";
 import { appendAuditEvent } from "../audit/writer.js";
 import { Composer } from "./composer.js";
@@ -552,6 +553,7 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
 
         const s = sessionRef.current;
         if (s) {
+          const isFirstTurn = s.turns.length === 0;
           s.turns.push({ role: "user", content: trimmed });
           s.turns.push({ role: "assistant", content: fullResponse });
           s.updatedAt = new Date().toISOString();
@@ -574,6 +576,11 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
             return true;
           });
           saveSession(s);
+
+          // Auto-name the session after the first turn.
+          if (isFirstTurn && s.name == null) {
+            void autoNameSession(s.id, trimmed, fullResponse, runtimeConfig);
+          }
         }
 
         // Defer write until after setBusy(false) so Ink collapses the live area

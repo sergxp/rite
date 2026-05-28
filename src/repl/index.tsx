@@ -1,5 +1,5 @@
 import React, { useState, useRef, useCallback, useEffect } from "react";
-import { render, Box, Text, useApp, useInput, useStdin } from "ink";
+import { render, Box, Text, useApp, useInput } from "ink";
 import { ConversationHistory } from "./history.js";
 import { buildEnrichedPrompt } from "./enricher.js";
 import { loadMemories } from "../memory/reader.js";
@@ -124,13 +124,18 @@ interface ReplProps {
 
 function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
   const { exit } = useApp();
-  const { stdin } = useStdin();
 
   // All completed messages — rendered in the managed viewport.
   const [completed, setCompleted] = useState<Message[]>([]);
   // scrollLines: lines scrolled above bottom (0 = pinned to bottom)
   const [scrollLines, setScrollLines] = useState(0);
   const atBottomRef = useRef(true);
+
+  // Terminal dimensions — updated on resize so layout recalculates.
+  const [termSize, setTermSize] = useState({
+    rows: process.stdout.rows ?? 24,
+    cols: process.stdout.columns ?? 80,
+  });
 
   // Live area
   const [streamContent, setStreamContent] = useState("");
@@ -200,25 +205,50 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
     return () => clearInterval(t);
   }, [busy]);
 
-  //  mouse scroll 
+  //  terminal resize 
 
   useEffect(() => {
-    if (!stdin) return;
+    const handler = () =>
+      setTermSize({ rows: process.stdout.rows ?? 24, cols: process.stdout.columns ?? 80 });
+    process.stdout.on("resize", handler);
+    return () => { process.stdout.off("resize", handler); };
+  }, []);
+
+  //  mouse scroll 
+  // Listen on process.stdin directly (same object, no useEffect dependency churn).
+  // Batch rapid events into one state update per setImmediate tick.
+
+  const scrollAccRef = useRef(0);
+  const scrollFlushRef = useRef(false);
+
+  const snapToBottom = useCallback(() => {
+    scrollAccRef.current = 0;
+    atBottomRef.current = true;
+    setScrollLines(0);
+  }, []);
+
+  useEffect(() => {
+    const LINES_PER_TICK = 5;
     const handler = (dir: unknown) => {
       if (dir === "up") {
+        scrollAccRef.current += LINES_PER_TICK;
         atBottomRef.current = false;
-        setScrollLines((s) => s + 3);
       } else {
-        setScrollLines((s) => {
-          const next = Math.max(0, s - 3);
-          atBottomRef.current = next === 0;
-          return next;
+        scrollAccRef.current = Math.max(0, scrollAccRef.current - LINES_PER_TICK);
+      }
+      if (!scrollFlushRef.current) {
+        scrollFlushRef.current = true;
+        setImmediate(() => {
+          scrollFlushRef.current = false;
+          const target = scrollAccRef.current;
+          atBottomRef.current = target === 0;
+          setScrollLines(target);
         });
       }
     };
-    stdin.on("mouse_scroll", handler);
-    return () => { stdin.off("mouse_scroll", handler); };
-  }, [stdin]);
+    process.stdin.on("mouse_scroll", handler);
+    return () => { process.stdin.off("mouse_scroll", handler); };
+  }, []);
 
   //  init 
 
@@ -382,8 +412,7 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
         setCompleted([
           { id: makeId("sys"), role: "system", content: "Context cleared." },
         ]);
-        setScrollLines(0);
-        atBottomRef.current = true;
+        snapToBottom();
         return;
       }
 
@@ -472,8 +501,7 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
       liveRef.current = "";
       setActiveTool(null);
       // Snap to bottom and add user message immediately.
-      setScrollLines(0);
-      atBottomRef.current = true;
+      snapToBottom();
       addCompleted({ id: makeId("user"), role: "user", content: trimmed });
 
       const abortController = new AbortController();
@@ -705,6 +733,7 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
       refreshMemories,
       persistBackend,
       addCompleted,
+      snapToBottom,
       exit,
     ]
   );
@@ -725,8 +754,7 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
           resumed.updatedAt = new Date().toISOString();
           saveSession(resumed);
           refreshMemories();
-          setScrollLines(0);
-          atBottomRef.current = true;
+          snapToBottom();
           setCompleted([
             { id: makeId("sys"), role: "system", content: `Switched to: ${resumed.name ?? resumed.id}` },
             ...resumed.turns.map((t) => ({
@@ -748,9 +776,10 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
     ? (sessionRef.current.name ?? sessionRef.current.id.slice(0, 10))
     : "";
 
+  // Use termSize state (updated on resize) so layout re-calculates correctly.
   const COMPOSER_ROWS = 5;
-  const viewportRows = process.stdout.rows ?? 24;
-  const termWidth = process.stdout.columns ?? 80;
+  const viewportRows = termSize.rows;
+  const termWidth = termSize.cols;
 
   // Budget rows for the live area.
   const liveAreaBudget = Math.max(4, viewportRows - COMPOSER_ROWS - 2);
@@ -768,10 +797,9 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
       ? `reasoned for ${(thinkingChars / 1000).toFixed(1)}k chars`
       : null;
 
-  // Rows available for the message viewport (shrinks when live area is active).
-  const liveAreaRows = isWorking && (streamPreview || thinkingLines || thinkingSummary || activeTool)
-    ? liveAreaBudget
-    : 0;
+  const hasLiveArea = isWorking && !!(streamPreview || thinkingLines || thinkingSummary || activeTool);
+  const liveAreaRows = hasLiveArea ? liveAreaBudget : 0;
+  // Message viewport rows: total - composer - live area - 1 (scroll indicator reserve).
   const msgViewportRows = Math.max(2, viewportRows - COMPOSER_ROWS - liveAreaRows - 1);
 
   const { messages: visibleMessages, hasMore } = getVisibleMessages(
@@ -783,22 +811,22 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
 
   return (
     <Box flexDirection="column" height={viewportRows}>
-      {/*  Message viewport — fixed height, line-count-based scroll  */}
-      <Box flexDirection="column" height={msgViewportRows} overflow="hidden">
+      {/*  Message viewport — flexGrow fills available space so composer stays at bottom  */}
+      <Box flexDirection="column" flexGrow={1} overflow="hidden">
         {visibleMessages.map((msg) => (
           <MessageBubble key={msg.id} message={msg} />
         ))}
       </Box>
 
-      {/*  Scroll indicator  */}
-      {hasMore && (
-        <Box paddingLeft={2}>
-          <Text dimColor>↑  scroll up for history  (mouse wheel)</Text>
-        </Box>
-      )}
+      {/*  Scroll indicator — 1 reserved row  */}
+      <Box paddingLeft={2} height={1}>
+        {hasMore
+          ? <Text dimColor>↑  scroll up for history  (mouse wheel)</Text>
+          : <Text> </Text>}
+      </Box>
 
       {/*  Live area — streams thinking + response preview while busy  */}
-      {isWorking && (streamPreview || thinkingLines || thinkingSummary || activeTool) && (
+      {hasLiveArea && (
         <Box flexDirection="column" marginBottom={1} flexShrink={0}>
           <Box paddingLeft={1}>
             <Text color="greenBright" bold>rite</Text>
@@ -826,7 +854,7 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
         </Box>
       )}
 
-      {/*  Composer — sticky at bottom  */}
+      {/*  Composer — always at bottom  */}
       <Composer
         value={input}
         onChange={(v) => { setInput(v); setHistoryIdx(null); }}

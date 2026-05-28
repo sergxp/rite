@@ -1,8 +1,5 @@
-import { existsSync } from "fs";
-import { join } from "path";
-import os from "os";
 import { EXTRACTION_SYSTEM_PROMPT } from "./prompts.js";
-import { createMemory, deleteMemory, updateMemory } from "../memory/writer.js";
+import { createMemory, deleteMemory, updateMemory, findMemoryScope } from "../memory/writer.js";
 import { appendAuditEvent } from "../audit/writer.js";
 import { callUtilityBlocking } from "../backends/utility.js";
 import type { MemoryType, InjectMode, Priority } from "../memory/types.js";
@@ -15,16 +12,22 @@ export interface ExtractionOperation {
   tags?: string[];
   inject?: InjectMode;
   priority?: Priority;
+  scope?: "global" | "workspace" | "project";
   body?: string;
 }
 
-function memoryFileExists(name: string, scope: "global" | "project"): boolean {
-  const dir =
-    scope === "global"
-      ? join(os.homedir(), ".rite", "memory")
-      : join(process.cwd(), ".rite", "memory");
-  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
-  return existsSync(join(dir, `${slug}.md`));
+/**
+ * Infer scope from memory type when the LLM doesn't provide one.
+ * - rule / user → global (applies across all projects)
+ * - everything else → project (repo-specific by default)
+ */
+function inferScope(op: ExtractionOperation): "global" | "workspace" | "project" {
+  if (op.scope === "global" || op.scope === "workspace" || op.scope === "project") {
+    return op.scope;
+  }
+  const type = op.type ?? "reference";
+  if (type === "rule" || type === "user") return "global";
+  return "project";
 }
 
 export async function extractMemories(
@@ -113,6 +116,7 @@ export async function extractMemories(
 
         if (op.action === "create") {
           if (!op.body) continue;
+          const scope = inferScope(op);
           createMemory(
             op.name,
             {
@@ -122,12 +126,15 @@ export async function extractMemories(
               priority: op.priority ?? "normal",
             },
             op.body,
-            "project"
+            scope
           );
-          auditData.applied.push(`create:${op.name}`);
+          auditData.applied.push(`create:${op.name}:${scope}`);
           savedCount++;
         } else if (op.action === "update") {
           if (!op.body) continue;
+          // Use explicitly given scope, or find where it already exists, or infer.
+          const existingScope = findMemoryScope(op.name);
+          const scope = inferScope(op) ?? existingScope ?? "project";
           updateMemory(
             op.name,
             {
@@ -137,9 +144,9 @@ export async function extractMemories(
               priority: op.priority ?? "normal",
             },
             op.body,
-            memoryFileExists(op.name, "global") ? "global" : "project"
+            scope
           );
-          auditData.applied.push(`update:${op.name}`);
+          auditData.applied.push(`update:${op.name}:${scope}`);
           savedCount++;
         } else if (op.action === "delete") {
           deleteMemory(op.name);

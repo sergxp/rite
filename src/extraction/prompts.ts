@@ -13,6 +13,7 @@ The ONLY valid output is a raw JSON array using this exact schema:
     "tags": ["tag1"],
     "inject": "always" | "semantic" | "never",
     "priority": "high" | "normal" | "low",
+    "scope": "global" | "workspace" | "project",
     "body": "memory content in markdown"
   }
 ]
@@ -27,6 +28,11 @@ Type guide:
 - user + semantic: work style or communication preferences
 - feedback + semantic: feedback about response quality
 - reference + semantic: URLs, APIs, external resources
+
+Scope guide:
+- "global": user-level patterns that apply to ANY project (coding style, preferences, personal rules). Use for type "rule" or "user".
+- "workspace": patterns that apply across MULTIPLE related projects in the same codebase/org (shared APIs, org-wide conventions, cross-repo architecture).
+- "project": knowledge specific to THIS repo only (local architecture, repo-specific decisions, file paths). Default for most things.
 
 Save only durable facts that will affect future conversations.
 Do NOT save: transient info, one-off context, general knowledge, reasoning steps.

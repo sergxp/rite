@@ -1,6 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
-import { join } from "path";
-import os from "os";
+import { join, dirname } from "path";
 import type { MemoryFile } from "./types.js";
 
 type EmbeddingPipeline = (
@@ -15,7 +14,10 @@ export async function getEmbeddingPipeline(): Promise<EmbeddingPipeline> {
 
   pipelinePromise = (async () => {
     const { pipeline, env } = await import("@xenova/transformers");
-    env.cacheDir = join(os.homedir(), ".rite", "models");
+    // Model cache stays in ~/.rite/models (unchanged).
+    const { join: j } = await import("path");
+    const { default: os } = await import("os");
+    env.cacheDir = j(os.homedir(), ".rite", "models");
     const pipe = await pipeline("feature-extraction", "Xenova/all-MiniLM-L6-v2");
     return pipe as unknown as EmbeddingPipeline;
   })();
@@ -49,8 +51,12 @@ interface IndexCache {
   updated: string;
 }
 
-function getIndexDir(): string {
-  return join(process.cwd(), ".rite", "memory", ".index");
+/**
+ * Returns the .index/ directory co-located with the memory file's parent directory.
+ * e.g. ~/.rite/memory/C--Repos-rite/foo.md → ~/.rite/memory/C--Repos-rite/.index/
+ */
+function getIndexDir(filePath: string): string {
+  return join(dirname(filePath), ".index");
 }
 
 function getCachePath(filePath: string): string {
@@ -58,14 +64,13 @@ function getCachePath(filePath: string): string {
     .split(/[\\/]/)
     .pop()!
     .replace(/\.md$/, "");
-  return join(getIndexDir(), `${slug}.json`);
+  return join(getIndexDir(filePath), `${slug}.json`);
 }
 
 export async function getOrCreateEmbedding(
   memoryFile: MemoryFile
 ): Promise<number[] | null> {
   try {
-    const indexDir = getIndexDir();
     const cachePath = getCachePath(memoryFile.filePath);
 
     if (existsSync(cachePath)) {
@@ -79,6 +84,7 @@ export async function getOrCreateEmbedding(
 
     const vector = await embedText(memoryFile.content);
 
+    const indexDir = getIndexDir(memoryFile.filePath);
     if (!existsSync(indexDir)) {
       mkdirSync(indexDir, { recursive: true });
     }
@@ -98,12 +104,8 @@ export async function embedAndCacheMemory(
   updated: string
 ): Promise<void> {
   try {
-    const indexDir = getIndexDir();
-    const slug = filePath
-      .split(/[\\/]/)
-      .pop()!
-      .replace(/\.md$/, "");
-    const cachePath = join(indexDir, `${slug}.json`);
+    const indexDir = getIndexDir(filePath);
+    const cachePath = getCachePath(filePath);
 
     const vector = await embedText(content);
 

@@ -1,11 +1,11 @@
-import { writeFileSync, unlinkSync, existsSync, mkdirSync } from "fs";
+import { writeFileSync, unlinkSync, existsSync, mkdirSync, readdirSync } from "fs";
 import { join } from "path";
-import os from "os";
 import { writeFrontmatter, parseFrontmatter } from "../utils/frontmatter.js";
+import { getMemoryRoot, getMemoryDir } from "./paths.js";
 import type { MemoryFrontmatter } from "./types.js";
 import { embedAndCacheMemory } from "./embeddings.js";
 
-function ensureMemoryDir(dir: string): void {
+function ensureDir(dir: string): void {
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true });
   }
@@ -15,14 +15,10 @@ export function createMemory(
   name: string,
   frontmatter: Omit<MemoryFrontmatter, "name" | "created" | "updated">,
   body: string,
-  scope: "global" | "project" = "project"
+  scope: "global" | "workspace" | "project" = "project"
 ): string {
-  const dir =
-    scope === "global"
-      ? join(os.homedir(), ".rite", "memory")
-      : join(process.cwd(), ".rite", "memory");
-
-  ensureMemoryDir(dir);
+  const dir = getMemoryDir(scope);
+  ensureDir(dir);
 
   const now = new Date().toISOString().split("T")[0];
   const fm: MemoryFrontmatter = {
@@ -51,14 +47,10 @@ export function updateMemory(
   name: string,
   frontmatter: Omit<MemoryFrontmatter, "name" | "created" | "updated">,
   body: string,
-  scope: "global" | "project" = "project"
+  scope: "global" | "workspace" | "project" = "project"
 ): string | null {
   try {
-    const dir =
-      scope === "global"
-        ? join(os.homedir(), ".rite", "memory")
-        : join(process.cwd(), ".rite", "memory");
-
+    const dir = getMemoryDir(scope);
     const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
     const filePath = join(dir, `${slug}.md`);
 
@@ -96,32 +88,60 @@ export function updateMemory(
   }
 }
 
+/**
+ * Delete a memory by name, searching all subfolders of ~/.rite/memory/.
+ * If scope is specified, only search that scope's directory.
+ */
 export function deleteMemory(
   name: string,
-  scope: "global" | "project" | "both" = "both"
+  scope?: "global" | "workspace" | "project"
 ): boolean {
   const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
   let deleted = false;
 
-  const dirs: Array<{ dir: string; tier: "global" | "project" }> = [];
-
-  if (scope === "global" || scope === "both") {
-    dirs.push({ dir: join(os.homedir(), ".rite", "memory"), tier: "global" });
-  }
-  if (scope === "project" || scope === "both") {
-    dirs.push({
-      dir: join(process.cwd(), ".rite", "memory"),
-      tier: "project",
-    });
-  }
-
-  for (const { dir } of dirs) {
-    const filePath = join(dir, `${slug}.md`);
+  if (scope) {
+    const filePath = join(getMemoryDir(scope), `${slug}.md`);
     if (existsSync(filePath)) {
       unlinkSync(filePath);
-      deleted = true;
+      return true;
     }
+    return false;
+  }
+
+  // No scope specified: search all subdirs.
+  const root = getMemoryRoot();
+  if (!existsSync(root)) return false;
+
+  try {
+    const dirs = readdirSync(root, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && !e.name.startsWith("."))
+      .map((e) => join(root, e.name));
+
+    for (const dir of dirs) {
+      const filePath = join(dir, `${slug}.md`);
+      if (existsSync(filePath)) {
+        unlinkSync(filePath);
+        deleted = true;
+      }
+    }
+  } catch {
+    // best-effort
   }
 
   return deleted;
+}
+
+/**
+ * Check if a memory file exists anywhere in the central store.
+ * Returns the scope where found, or null.
+ */
+export function findMemoryScope(
+  name: string
+): "global" | "workspace" | "project" | null {
+  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+  for (const scope of ["global", "workspace", "project"] as const) {
+    const filePath = join(getMemoryDir(scope), `${slug}.md`);
+    if (existsSync(filePath)) return scope;
+  }
+  return null;
 }

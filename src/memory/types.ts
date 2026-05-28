@@ -16,5 +16,7 @@ export interface MemoryFile {
   frontmatter: MemoryFrontmatter;
   content: string;
   filePath: string;
-  tier: "global" | "project";
+  tier: "global" | "workspace" | "project";
+  /** The slug (subfolder name) this memory was loaded from, e.g. "C--Repositories-rite" */
+  slug: string;
 }

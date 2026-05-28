@@ -131,7 +131,7 @@ export async function* callClaude(
   }
 
   // Track tool_use blocks (to emit tool_done on stop) and thinking blocks (to route deltas).
-  const toolBlocks = new Map<number, { name: string; id: string }>();
+  const toolBlocks = new Map<number, { name: string; id: string; inputJson: string }>();
   const thinkingBlocks = new Set<number>();
 
   let buffer = "";
@@ -152,6 +152,31 @@ export async function* callClaude(
           continue;
         }
 
+        // Tool results arrive as top-level "user" events (the CLI's synthetic tool_result turn).
+        if (event.type === "user") {
+          const message = event.message as Record<string, unknown> | undefined;
+          const content = message?.content as Array<Record<string, unknown>> | undefined;
+          if (Array.isArray(content)) {
+            for (const block of content) {
+              if (block.type === "tool_result") {
+                const id = typeof block.tool_use_id === "string" ? block.tool_use_id : "";
+                const isError = block.is_error === true;
+                // content may be a string or an array of content blocks
+                let result = "";
+                if (typeof block.content === "string") {
+                  result = block.content;
+                } else if (Array.isArray(block.content)) {
+                  result = (block.content as Array<Record<string, unknown>>)
+                    .map((b) => (b.type === "text" && typeof b.text === "string" ? b.text : ""))
+                    .join("");
+                }
+                yield { type: "tool_result", id, result, isError };
+              }
+            }
+          }
+          continue;
+        }
+
         if (event.type !== "stream_event") continue;
 
         const inner = event.event as Record<string, unknown> | undefined;
@@ -163,7 +188,7 @@ export async function* callClaude(
           if (block?.type === "tool_use") {
             const name = typeof block.name === "string" ? block.name : "unknown";
             const id = typeof block.id === "string" ? block.id : `tool-${index}`;
-            toolBlocks.set(index, { name, id });
+            toolBlocks.set(index, { name, id, inputJson: "" });
             yield { type: "tool_call", name, id };
           } else if (block?.type === "thinking") {
             thinkingBlocks.add(index);
@@ -175,7 +200,7 @@ export async function* callClaude(
           const index = inner.index as number;
           const info = toolBlocks.get(index);
           if (info) {
-            yield { type: "tool_done", name: info.name, id: info.id };
+            yield { type: "tool_done", name: info.name, id: info.id, inputJson: info.inputJson };
             toolBlocks.delete(index);
           } else {
             thinkingBlocks.delete(index);
@@ -189,6 +214,14 @@ export async function* callClaude(
           if (thinkingBlocks.has(index)) {
             if (delta?.type === "thinking_delta" && typeof delta.thinking === "string") {
               yield { type: "thinking", content: delta.thinking };
+            }
+            continue;
+          }
+          // Accumulate tool input JSON as it streams in.
+          const toolBlock = toolBlocks.get(index);
+          if (toolBlock) {
+            if (delta?.type === "input_json_delta" && typeof delta.partial_json === "string") {
+              toolBlock.inputJson += delta.partial_json;
             }
             continue;
           }

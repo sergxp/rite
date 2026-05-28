@@ -486,8 +486,8 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
       let writeAfterCollapse: (() => void) | null = null;
       // Track current thinking block — emitted to Static when the block ends.
       let pendingThinkingText = "";
-      // Track per-tool start times for duration display.
-      const toolStartTimes = new Map<string, number>();
+      // Hold tool calls until we have the result (then emit as one message).
+      const pendingToolCalls = new Map<string, { name: string; inputJson: string; startedAt: number }>();
       thinkingRef.current = { chars: 0, text: "" };
 
       /** Flush the current thinking block to Static and reset live tracking. */
@@ -513,19 +513,28 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
           } else if (event.type === "tool_call") {
             // Thinking block ends when a tool call starts.
             flushThinking();
-            toolStartTimes.set(event.id, Date.now());
+            pendingToolCalls.set(event.id, { name: event.name, inputJson: "", startedAt: Date.now() });
             setActiveTool(event.name);
           } else if (event.type === "tool_done") {
-            const startedAt = toolStartTimes.get(event.id) ?? Date.now();
-            toolStartTimes.delete(event.id);
-            addCompleted({
-              id: makeId("tool"),
-              role: "tool_call",
-              content: event.name,
-              toolName: event.name,
-              durationMs: Date.now() - startedAt,
-            });
+            // Update inputJson; keep pending until tool_result arrives.
+            const pending = pendingToolCalls.get(event.id);
+            if (pending) pending.inputJson = event.inputJson ?? "";
             setActiveTool(null);
+          } else if (event.type === "tool_result") {
+            const pending = pendingToolCalls.get(event.id);
+            if (pending) {
+              pendingToolCalls.delete(event.id);
+              addCompleted({
+                id: makeId("tool"),
+                role: "tool_call",
+                content: pending.name,
+                toolName: pending.name,
+                toolInputJson: pending.inputJson,
+                toolResult: event.result,
+                toolIsError: event.isError,
+                durationMs: Date.now() - pending.startedAt,
+              });
+            }
           }
         }
 
@@ -603,6 +612,18 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
         }
       } finally {
         abortControllerRef.current = null;
+        // Flush any tool calls that never got a result (e.g. on cancel/error).
+        for (const [, pending] of pendingToolCalls) {
+          addCompleted({
+            id: makeId("tool"),
+            role: "tool_call",
+            content: pending.name,
+            toolName: pending.name,
+            toolInputJson: pending.inputJson,
+            durationMs: Date.now() - pending.startedAt,
+          });
+        }
+        pendingToolCalls.clear();
         setBusy(false);
         setStreamContent("");
         liveRef.current = "";

@@ -10,7 +10,67 @@ export interface Message {
   content: string;
   // tool_call metadata
   toolName?: string;
+  toolInputJson?: string;
+  toolResult?: string;
+  toolIsError?: boolean;
   durationMs?: number;
+}
+
+// Extract a concise description from tool input JSON (filename, command, pattern, etc.)
+function toolInputSummary(toolName: string, inputJson: string): string {
+  try {
+    const input = JSON.parse(inputJson) as Record<string, unknown>;
+    // Prefer the most meaningful single field per tool type
+    if (typeof input.command === "string") {
+      const cmd = input.command.replace(/\s+/g, " ").trim();
+      return cmd.length > 60 ? cmd.slice(0, 60) + "…" : cmd;
+    }
+    if (typeof input.file_path === "string") return input.file_path;
+    if (typeof input.path === "string") return input.path;
+    if (typeof input.pattern === "string") {
+      const suffix = typeof input.path === "string" ? ` in ${input.path}` : "";
+      return `${input.pattern}${suffix}`;
+    }
+    if (typeof input.query === "string") return input.query;
+    return "";
+  } catch {
+    return "";
+  }
+}
+
+// Render a 3-line preview of tool output, colorizing diff lines like open-claudecode.
+function ToolResultPreview({ result, isError }: { result: string; isError: boolean }) {
+  if (isError) {
+    const preview = result.slice(0, 200).replace(/\n/g, " ");
+    return (
+      <Box paddingLeft={4}>
+        <Text color="red">✗ {preview}</Text>
+      </Box>
+    );
+  }
+
+  const lines = result.split("\n").filter((l) => l.trim());
+  const hasDiff =
+    lines.some((l) => l.startsWith("- ")) && lines.some((l) => l.startsWith("+ "));
+  const preview = lines.slice(0, 4);
+  const overflow = lines.length > 4 ? lines.length - 4 : 0;
+
+  return (
+    <Box flexDirection="column" paddingLeft={4}>
+      {preview.map((line, i) => {
+        if (hasDiff) {
+          if (line.startsWith("+ "))
+            return <Text key={i} color="green" dimColor>{line}</Text>;
+          if (line.startsWith("- "))
+            return <Text key={i} color="red" dimColor>{line}</Text>;
+        }
+        return <Text key={i} dimColor>{line}</Text>;
+      })}
+      {overflow > 0 && (
+        <Text dimColor>… ({overflow} more lines)</Text>
+      )}
+    </Box>
+  );
 }
 
 function ThinkingBubble({ content }: { content: string }) {
@@ -54,13 +114,36 @@ function ThinkingBubble({ content }: { content: string }) {
   );
 }
 
-function ToolCallBubble({ toolName, durationMs }: { toolName: string; durationMs?: number }) {
+function ToolCallBubble({
+  toolName,
+  toolInputJson,
+  toolResult,
+  toolIsError,
+  durationMs,
+}: {
+  toolName: string;
+  toolInputJson?: string;
+  toolResult?: string;
+  toolIsError?: boolean;
+  durationMs?: number;
+}) {
+  const detail = toolInputJson ? toolInputSummary(toolName, toolInputJson) : "";
   const duration = durationMs !== undefined ? ` (${durationMs}ms)` : "";
+  const statusColor = toolIsError ? "red" : "cyan";
+  const statusIcon = toolIsError ? "✗" : "✓";
+
   return (
-    <Box marginBottom={0} paddingLeft={2}>
-      <Text dimColor>⚙ </Text>
-      <Text color="cyanBright" dimColor>{toolName}</Text>
-      <Text dimColor> → ✓{duration}</Text>
+    <Box flexDirection="column" marginBottom={toolResult ? 0 : 1}>
+      <Box paddingLeft={2}>
+        <Text dimColor>⚙ </Text>
+        <Text color="cyanBright" bold dimColor>{toolName}</Text>
+        {detail ? <Text dimColor>  {detail}</Text> : null}
+        <Text dimColor>  </Text>
+        <Text color={statusColor} dimColor>{statusIcon}{duration}</Text>
+      </Box>
+      {toolResult !== undefined && (
+        <ToolResultPreview result={toolResult} isError={toolIsError ?? false} />
+      )}
     </Box>
   );
 }
@@ -71,7 +154,13 @@ export function MessageBubble({ message }: { message: Message }) {
   }
 
   if (message.role === "tool_call") {
-    return <ToolCallBubble toolName={message.toolName ?? message.content} durationMs={message.durationMs} />;
+    return <ToolCallBubble
+      toolName={message.toolName ?? message.content}
+      toolInputJson={message.toolInputJson}
+      toolResult={message.toolResult}
+      toolIsError={message.toolIsError}
+      durationMs={message.durationMs}
+    />;
   }
 
   if (message.role === "system") {

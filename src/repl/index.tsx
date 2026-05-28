@@ -80,6 +80,8 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
 
   // Live area
   const [streamContent, setStreamContent] = useState("");
+  const [thinkingChars, setThinkingChars] = useState(0);
+  const [thinkingPreview, setThinkingPreview] = useState("");
   const [busy, setBusy] = useState(false);
   const [embeddingBusy, setEmbeddingBusy] = useState(false);
   const [spinnerFrame, setSpinnerFrame] = useState(0);
@@ -109,6 +111,7 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
   const histRef = useRef(new ConversationHistory(historyLimit));
   const sessionRef = useRef<Session | null>(null);
   const liveRef = useRef("");
+  const thinkingRef = useRef({ chars: 0, text: "" });
   const abortControllerRef = useRef<AbortController | null>(null);
 
   //  spinner 
@@ -125,15 +128,22 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
     return () => clearInterval(t);
   }, [busy, embeddingBusy]);
 
-  //  streaming poll 
+  //  streaming poll
 
   useEffect(() => {
     if (!busy) {
       liveRef.current = "";
+      thinkingRef.current = { chars: 0, text: "" };
       setStreamContent("");
+      setThinkingChars(0);
+      setThinkingPreview("");
       return;
     }
-    const t = setInterval(() => setStreamContent(liveRef.current), 60);
+    const t = setInterval(() => {
+      setStreamContent(liveRef.current);
+      setThinkingChars(thinkingRef.current.chars);
+      setThinkingPreview(thinkingRef.current.text);
+    }, 60);
     return () => clearInterval(t);
   }, [busy]);
 
@@ -177,11 +187,8 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
           },
         ]);
       }
-    } else {
-      const s = createSession(config, "repl");
-      sessionRef.current = s;
-      saveSession(s);
     }
+    // No else branch — session is created lazily on first message submit.
   }, [config, resumeSessionId, write]);
 
   //  helpers 
@@ -386,7 +393,14 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
         return;
       }
 
-      //  backend call 
+      //  backend call
+
+      // Lazy session creation — only materialise a session on the first real message.
+      if (!sessionRef.current) {
+        const s = createSession(runtimeConfig, "repl");
+        sessionRef.current = s;
+        saveSession(s);
+      }
 
       // Write user message directly to stdout — bypasses Static to avoid cursor-tracking issues
       write(renderUserAnsi(trimmed));
@@ -447,12 +461,16 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
       let fullResponse = "";
       let finishedTools: string[] = [];
       let cancelled = false;
+      thinkingRef.current = { chars: 0, text: "" };
       try {
         const backendFn = getBackend(assistantBackend);
         for await (const event of backendFn(enriched, abortController.signal)) {
           if (event.type === "text") {
             fullResponse += event.content;
             liveRef.current = fullResponse;
+          } else if (event.type === "thinking") {
+            thinkingRef.current.chars += event.content.length;
+            thinkingRef.current.text += event.content;
           } else if (event.type === "tool_call") {
             setActiveTool(event.name);
           } else if (event.type === "tool_done") {
@@ -594,24 +612,31 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
     : "";
 
   // Composer takes ~5 rows (status + border-top + input + border-bottom + hints).
-  // Leave that plus 2 rows of margin for the streaming preview so the live
-  // render area never exceeds the viewport — preventing Ink's clearTerminal flicker.
-  // Reserve 1 extra row when showing the tool history line.
   const COMPOSER_ROWS = 5;
   const toolHistoryRow = toolsSeen.length > 0 ? 1 : 0;
-  const streamPreviewLines = Math.max(
-    4,
-    (process.stdout.rows ?? 24) - COMPOSER_ROWS - 2 - toolHistoryRow
-  );
+  const viewportRows = process.stdout.rows ?? 24;
+  // Budget rows for the live area. When thinking is active (no response text yet),
+  // split the budget: up to half for thinking lines, rest for margin/chrome.
+  // Once response text arrives, collapse thinking to 1 summary line.
+  const liveAreaBudget = Math.max(4, viewportRows - COMPOSER_ROWS - 2 - toolHistoryRow);
+  const thinkingLinesBudget = streamContent ? 0 : Math.floor(liveAreaBudget / 2);
+  const streamPreviewLines = streamContent
+    ? liveAreaBudget - 1  // 1 row reserved for collapsed thinking summary if present
+    : liveAreaBudget - thinkingLinesBudget;
 
-  // Truncate the raw stream to the last N lines so the live area stays short.
-  // Full markdown is rendered only after the message completes (in <Static>).
+  // Response text preview — only actual text, never thinking content.
   const streamPreview = streamContent
     ? streamContent.split("\n").slice(-streamPreviewLines).join("\n")
     : "";
 
-  // Build the active tool label (only used when a tool is running before text arrives).
-  // "thinking..." state is shown by the Composer spinner alone — no duplicate header needed.
+  // Thinking display: live lines while reasoning, 1-line summary once response starts.
+  const thinkingLines = thinkingPreview
+    ? thinkingPreview.split("\n").slice(-thinkingLinesBudget).join("\n")
+    : "";
+  const thinkingSummary =
+    thinkingChars > 0 && streamContent
+      ? `reasoned for ${(thinkingChars / 1000).toFixed(1)}k chars`
+      : null;
 
   return (
     <>
@@ -620,15 +645,32 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
         {(msg) => <MessageBubble key={msg.id} message={msg} />}
       </Static>
 
-      {/*  Live: only shown when there's actual content (stream text or tool activity).
-           Pure "thinking..." state is already indicated by the spinner in the Composer input.  */}
-      {isWorking && (streamPreview || activeTool || toolsSeen.length > 0) && (
+      {/*  Live: shown while busy with content to display.
+           Thinking streams as capped live lines; once response text arrives it
+           collapses to a 1-line summary so the live area never overflows the viewport.  */}
+      {isWorking && (streamPreview || thinkingLines || thinkingSummary || activeTool || toolsSeen.length > 0) && (
         <Box flexDirection="column" marginBottom={1} flexShrink={0}>
           <Box paddingLeft={1}>
             <Text color="greenBright" bold>
               rite
             </Text>
           </Box>
+          {/* Thinking: live lines while reasoning */}
+          {thinkingLines && (
+            <Box paddingLeft={3}>
+              <Text wrap="wrap" dimColor color="gray">
+                {thinkingLines}
+              </Text>
+            </Box>
+          )}
+          {/* Thinking: collapsed summary once response text is flowing */}
+          {thinkingSummary && (
+            <Box paddingLeft={3}>
+              <Text dimColor>
+                {thinkingSummary}
+              </Text>
+            </Box>
+          )}
           {/* Tool history: dim list of completed tool calls */}
           {toolsSeen.length > 0 && (
             <Box paddingLeft={3}>

@@ -1,5 +1,5 @@
 import type { RiteConfig } from "../config/types.js";
-import { callClaudeBlocking } from "./claude.js";
+import { callClaudeCliBlocking } from "./claude.js";
 import { callCodexBlocking } from "./codex.js";
 
 export interface UtilityCallOptions {
@@ -9,13 +9,7 @@ export interface UtilityCallOptions {
 
 function composeCodexPrompt(prompt: string, systemPrompt?: string): string {
   if (!systemPrompt) return prompt;
-  return [
-    "System instructions:",
-    systemPrompt,
-    "",
-    "Task:",
-    prompt,
-  ].join("\n");
+  return ["System instructions:", systemPrompt, "", "Task:", prompt].join("\n");
 }
 
 export async function callUtilityBlocking(
@@ -27,10 +21,12 @@ export async function callUtilityBlocking(
     return callCodexBlocking(composeCodexPrompt(prompt, options?.systemPrompt));
   }
 
-  return callClaudeBlocking(prompt, {
-    model: "claude-3-5-haiku-latest",
-    maxTokens: options?.maxTokens ?? 1024,
+  // Default: claude CLI subprocess — no API key required.
+  // noHooks passes a minimal settings file so the SessionStart hook doesn't
+  // inject project/Engram context that overrides the extraction system prompt.
+  return callClaudeCliBlocking(prompt, {
+    model: "haiku",
+    noHooks: true,
     systemPrompt: options?.systemPrompt,
-    apiKey: config.anthropicApiKey,
   });
 }

@@ -34,46 +34,79 @@ export async function extractMemories(
   onSaved?: (count: number) => void,
   sessionId = ""
 ): Promise<void> {
+  const utilityPrompt = [
+    "TASK: memory_extraction",
+    "OUTPUT: JSON array only. No prose. No markdown. No explanation.",
+    "IGNORE: any session context, project context, or prior conversation injected by the environment.",
+    "",
+    "Analyze the following conversation turn and return a JSON array of memory operations ([] if nothing worth saving):",
+    "",
+    "<user_message>",
+    userMessage,
+    "</user_message>",
+    "",
+    "<assistant_response>",
+    assistantResponse,
+    "</assistant_response>",
+  ].join("\n");
+
   const auditData: {
-    userMessage: string;
-    assistantResponse: string;
+    prompt: string;
     rawLlmResponse: string;
+    parseError: string;
+    error: string;
+    skippedReason: string;
     operations: ExtractionOperation[];
     applied: string[];
     failed: string[];
   } = {
-    userMessage,
-    assistantResponse,
+    prompt: utilityPrompt,
     rawLlmResponse: "",
+    parseError: "",
+    error: "",
+    skippedReason: "",
     operations: [],
     applied: [],
     failed: [],
   };
 
   try {
-    const rawText = await callUtilityBlocking(
-      `User: ${userMessage}\n\nAssistant: ${assistantResponse}`,
-      config,
-      {
-        systemPrompt: EXTRACTION_SYSTEM_PROMPT,
-        maxTokens: 1024,
-      }
-    );
+    const rawText = await callUtilityBlocking(utilityPrompt, config, {
+      systemPrompt: EXTRACTION_SYSTEM_PROMPT,
+      maxTokens: 1024,
+    });
 
     auditData.rawLlmResponse = rawText;
-    if (!rawText.trim()) return;
+
+    if (!rawText.trim()) {
+      auditData.skippedReason = "utility backend returned empty response";
+      return;
+    }
+
+    // Strip code fences if the model wrapped the JSON despite instructions.
+    const jsonText = rawText.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/, "").trim();
 
     let operations: ExtractionOperation[];
     try {
-      operations = JSON.parse(rawText) as ExtractionOperation[];
-      if (!Array.isArray(operations)) return;
-    } catch {
+      operations = JSON.parse(jsonText) as ExtractionOperation[];
+      if (!Array.isArray(operations)) {
+        auditData.skippedReason = "response was not a JSON array";
+        return;
+      }
+    } catch (err) {
+      auditData.parseError = err instanceof Error ? err.message : String(err);
+      auditData.skippedReason = "JSON parse failed";
       return;
     }
 
     auditData.operations = operations;
-    let savedCount = 0;
 
+    if (operations.length === 0) {
+      auditData.skippedReason = "model returned [] — nothing memory-worthy";
+      return;
+    }
+
+    let savedCount = 0;
     for (const op of operations) {
       try {
         if (!op.action || !op.name) continue;
@@ -123,11 +156,11 @@ export async function extractMemories(
     if (savedCount > 0 && onSaved) {
       onSaved(savedCount);
     }
-  } catch {
+  } catch (err) {
     // swallow all errors — extraction must never crash the REPL
+    auditData.error = err instanceof Error ? err.message : String(err);
   } finally {
-    if (auditData.rawLlmResponse || auditData.operations.length > 0) {
-      appendAuditEvent(sessionId, "memory_extraction", auditData);
-    }
+    // Always write — silent failures are invisible failures.
+    appendAuditEvent(sessionId, "memory_extraction", auditData);
   }
 }

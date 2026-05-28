@@ -1,5 +1,8 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { execa } from "execa";
+import { existsSync, mkdirSync, writeFileSync } from "fs";
+import { join } from "path";
+import os from "os";
 import type { BackendEvent } from "./events.js";
 
 function isEnoent(err: unknown): boolean {
@@ -34,6 +37,48 @@ function extractText(message: { content: Array<{ type: string; text?: string }> 
     .join("");
 }
 
+function noHooksSettingsPath(): string {
+  const dir = join(os.homedir(), ".rite");
+  const path = join(dir, "utility-settings.json");
+  if (!existsSync(path)) {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path, JSON.stringify({ hooks: {} }), "utf-8");
+  }
+  return path;
+}
+
+export async function callClaudeCliBlocking(
+  prompt: string,
+  options?: { systemPrompt?: string; model?: string; noHooks?: boolean }
+): Promise<string> {
+  const args = ["--print", "--output-format", "text"];
+  if (options?.model) {
+    args.push("--model", options.model);
+  }
+  if (options?.noHooks) {
+    args.push("--settings", noHooksSettingsPath());
+  }
+  if (options?.systemPrompt) {
+    args.push("--system-prompt", options.systemPrompt);
+  }
+
+  try {
+    const result = await execa("claude", args, {
+      reject: false,
+      stdin: "pipe",
+      input: prompt,
+    });
+    return result.stdout?.trim() ?? "";
+  } catch (err) {
+    if (isEnoent(err)) {
+      throw new Error(
+        "claude binary not found in PATH. Install Claude Code first: https://claude.ai/code"
+      );
+    }
+    throw err;
+  }
+}
+
 export async function callClaudeBlocking(
   prompt: string,
   options?: {
@@ -66,7 +111,7 @@ export async function* callClaude(
 ): AsyncIterable<BackendEvent> {
   const subprocess = execa(
     "claude",
-    ["-p", "--output-format", "stream-json", "--include-partial-messages"],
+    ["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages"],
     { reject: false, stdin: "pipe", input: prompt, cancelSignal: signal }
   );
 
@@ -85,8 +130,9 @@ export async function* callClaude(
     return;
   }
 
-  // Track which content block index is a tool_use block so we can emit tool_done on stop.
-  const blockTypes = new Map<number, { name: string; id: string }>();
+  // Track tool_use blocks (to emit tool_done on stop) and thinking blocks (to route deltas).
+  const toolBlocks = new Map<number, { name: string; id: string }>();
+  const thinkingBlocks = new Set<number>();
 
   let buffer = "";
   try {
@@ -98,47 +144,58 @@ export async function* callClaude(
 
       for (const line of lines) {
         if (!line.trim()) continue;
+        let event: Record<string, unknown>;
         try {
-          const event = JSON.parse(line) as Record<string, unknown>;
-
-          if (event.type !== "stream_event") continue;
-
-          const inner = event.event as Record<string, unknown> | undefined;
-          if (!inner) continue;
-
-          if (inner.type === "content_block_start") {
-            const index = inner.index as number;
-            const block = inner.content_block as Record<string, unknown> | undefined;
-            if (block?.type === "tool_use") {
-              const name = typeof block.name === "string" ? block.name : "unknown";
-              const id = typeof block.id === "string" ? block.id : `tool-${index}`;
-              blockTypes.set(index, { name, id });
-              yield { type: "tool_call", name, id };
-            }
-            continue;
-          }
-
-          if (inner.type === "content_block_stop") {
-            const index = inner.index as number;
-            const info = blockTypes.get(index);
-            if (info) {
-              yield { type: "tool_done", name: info.name, id: info.id };
-              blockTypes.delete(index);
-            }
-            continue;
-          }
-
-          if (inner.type === "content_block_delta") {
-            const delta = inner.delta as Record<string, unknown> | undefined;
-            // Only surface text deltas; skip input_json_delta (tool args)
-            if (delta?.type === "text_delta" && typeof delta.text === "string") {
-              yield { type: "text", content: delta.text };
-            }
-            continue;
-          }
+          event = JSON.parse(line) as Record<string, unknown>;
         } catch {
-          // not JSON — yield as raw text
-          yield { type: "text", content: line + "\n" };
+          // Non-JSON line from CLI (e.g. debug output) — discard, don't surface as text.
+          continue;
+        }
+
+        if (event.type !== "stream_event") continue;
+
+        const inner = event.event as Record<string, unknown> | undefined;
+        if (!inner) continue;
+
+        if (inner.type === "content_block_start") {
+          const index = inner.index as number;
+          const block = inner.content_block as Record<string, unknown> | undefined;
+          if (block?.type === "tool_use") {
+            const name = typeof block.name === "string" ? block.name : "unknown";
+            const id = typeof block.id === "string" ? block.id : `tool-${index}`;
+            toolBlocks.set(index, { name, id });
+            yield { type: "tool_call", name, id };
+          } else if (block?.type === "thinking") {
+            thinkingBlocks.add(index);
+          }
+          continue;
+        }
+
+        if (inner.type === "content_block_stop") {
+          const index = inner.index as number;
+          const info = toolBlocks.get(index);
+          if (info) {
+            yield { type: "tool_done", name: info.name, id: info.id };
+            toolBlocks.delete(index);
+          } else {
+            thinkingBlocks.delete(index);
+          }
+          continue;
+        }
+
+        if (inner.type === "content_block_delta") {
+          const index = inner.index as number;
+          const delta = inner.delta as Record<string, unknown> | undefined;
+          if (thinkingBlocks.has(index)) {
+            if (delta?.type === "thinking_delta" && typeof delta.thinking === "string") {
+              yield { type: "thinking", content: delta.thinking };
+            }
+            continue;
+          }
+          if (delta?.type === "text_delta" && typeof delta.text === "string") {
+            yield { type: "text", content: delta.text };
+          }
+          continue;
         }
       }
     }

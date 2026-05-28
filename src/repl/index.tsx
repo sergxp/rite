@@ -1,6 +1,5 @@
 import React, { useState, useRef, useCallback, useEffect } from "react";
 import { render, Box, Text, useApp, useInput, useStdin } from "ink";
-import { Transform } from "stream";
 import { ConversationHistory } from "./history.js";
 import { buildEnrichedPrompt } from "./enricher.js";
 import { loadMemories } from "../memory/reader.js";
@@ -889,36 +888,36 @@ const MOUSE_EXIT  = "\x1b[?1000l\x1b[?1006l";   // disable SGR mouse
 
 const SGR_MOUSE_RE = /\x1b\[<\d+;\d+;\d+[Mm]/g;
 
-// Create a Transform stream that strips SGR mouse escape sequences before they
-// reach Ink's stdin parser. Ink reads via 'readable'+read() (not 'data'), so
-// patching emit() alone is insufficient — we must filter at the stream level.
-// Scroll events are re-emitted as a custom 'mouse_scroll' event on the transform.
-function createMouseFilterStdin() {
-  const xform = new Transform({
-    transform(chunk: Buffer, _enc: string, cb: () => void) {
-      const str = chunk.toString("binary");
-      // Emit custom events for scroll up (64) / scroll down (65).
+// Patch process.stdin.push() BEFORE render() — this intercepts data at the
+// stream buffer level, BEFORE Ink reads it, without needing a Transform/pipe.
+// Ink uses .read()/.readable to pull data from the buffer; patching push()
+// ensures filtered data enters the buffer, so Ink never sees raw mouse bytes.
+// Scroll events are emitted on process.stdin as a custom 'mouse_scroll' event.
+function installStdinMouseFilter(): () => void {
+  const origPush = (process.stdin.push as (...a: unknown[]) => boolean).bind(process.stdin);
+
+  (process.stdin as unknown as Record<string, unknown>).push = function (
+    chunk: Buffer | string | null,
+    encoding?: BufferEncoding
+  ): boolean {
+    if (chunk !== null && chunk !== undefined) {
+      const str = Buffer.isBuffer(chunk) ? chunk.toString("binary") : String(chunk);
       for (const m of str.matchAll(/\x1b\[<(\d+);\d+;\d+M/g)) {
         const code = parseInt(m[1], 10);
-        if (code === 64) xform.emit("mouse_scroll", "up");
-        else if (code === 65) xform.emit("mouse_scroll", "down");
+        if (code === 64) process.stdin.emit("mouse_scroll", "up");
+        else if (code === 65) process.stdin.emit("mouse_scroll", "down");
       }
-      // Strip ALL SGR mouse bytes so Ink never sees them.
       const filtered = str.replace(SGR_MOUSE_RE, "");
-      if (filtered) this.push(Buffer.from(filtered, "binary"));
-      cb();
-    },
-  });
-
-  // Ink checks stdin.isTTY and calls stdin.setRawMode — forward both.
-  Object.defineProperty(xform, "isTTY", {
-    get: () => (process.stdin as NodeJS.ReadStream).isTTY ?? false,
-  });
-  (xform as unknown as { setRawMode: (m: boolean) => void }).setRawMode = (mode: boolean) => {
-    (process.stdin as NodeJS.ReadStream).setRawMode?.(mode);
+      if (!filtered) return true; // nothing to push, backpressure: OK
+      chunk = Buffer.isBuffer(chunk) ? Buffer.from(filtered, "binary") : filtered;
+    }
+    return origPush(chunk, encoding);
   };
 
-  return xform;
+  return () => {
+    // Restore original push on cleanup.
+    (process.stdin as unknown as Record<string, unknown>).push = origPush;
+  };
 }
 
 export async function startRepl(
@@ -933,17 +932,14 @@ export async function startRepl(
   // instead of being converted to up/down arrow keys.
   process.stdout.write(MOUSE_ENTER);
 
-  // Build the filtering Transform and pipe raw stdin through it.
-  // Ink will read from stdinFilter instead of process.stdin, so it never
-  // receives the raw SGR bytes that would otherwise appear in the text input.
-  const stdinFilter = createMouseFilterStdin();
-  process.stdin.pipe(stdinFilter);
+  // Patch stdin.push() BEFORE render() so Ink never sees raw SGR mouse bytes.
+  // (push() intercepts data before it enters the buffer; Ink reads from the buffer.)
+  const uninstallMouseFilter = installStdinMouseFilter();
 
   const cleanup = () => {
+    uninstallMouseFilter();
     process.stdout.write(MOUSE_EXIT);
     process.stdout.write(ALT_EXIT);
-    process.stdin.unpipe(stdinFilter);
-    stdinFilter.destroy();
   };
 
   // Ensure the screen is restored on any exit path.
@@ -960,8 +956,7 @@ export async function startRepl(
         historyLimit={historyLimit}
         config={config}
         resumeSessionId={resumeSessionId}
-      />,
-      { stdin: stdinFilter as unknown as NodeJS.ReadStream }
+      />
     );
     await waitUntilExit();
   } finally {

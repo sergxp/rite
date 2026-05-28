@@ -406,7 +406,7 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
       setBusy(true);
       liveRef.current = "";
       setActiveTool(null);
-      setToolsSeen([]);
+
       const abortController = new AbortController();
       abortControllerRef.current = abortController;
 

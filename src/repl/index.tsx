@@ -431,25 +431,49 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
       }
 
       const sessionId = sessionRef.current?.id ?? "";
+
+      // Replicate buildEnrichedPrompt's deduplication so the audit reflects
+      // exactly what ends up in the prompt, not the raw input lists.
+      const alwaysPaths = new Set(alwaysMemories.map((m) => m.filePath));
+      const deduplicatedSemanticHits = semanticHitsWithScores.filter(
+        (h) => !alwaysPaths.has(h.file.filePath)
+      );
+
+      const memoriesInjected = [
+        ...alwaysMemories.map((m) => ({
+          source: "always" as const,
+          name: m.frontmatter.name,
+          tier: m.tier,
+          inject: m.frontmatter.inject,
+        })),
+        ...deduplicatedSemanticHits.map((h) => ({
+          source: "semantic" as const,
+          name: h.file.frontmatter.name,
+          tier: h.file.tier,
+          inject: h.file.frontmatter.inject,
+          score: h.score,
+        })),
+      ];
+
       appendAuditEvent(sessionId, "prompt_sent", {
         userMessage: trimmed,
-        memoriesInjected: [
-          ...alwaysMemories.map((m) => ({
-            name: m.frontmatter.name,
-            tier: m.tier,
-            inject: m.frontmatter.inject,
-          })),
-          ...semanticHitsWithScores.map((h) => ({
-            name: h.file.frontmatter.name,
-            tier: h.file.tier,
-            inject: h.file.frontmatter.inject,
-            score: h.score,
-          })),
-        ],
+        memoriesInjected,
         historyTurnCount: histRef.current.length,
         backend: assistantBackend,
         utilityBackend: runtimeConfig.utilityBackend,
       });
+
+      // Dedicated event so it's easy to grep the audit for memory-injected turns.
+      if (memoriesInjected.length > 0) {
+        appendAuditEvent(sessionId, "memories_injected", {
+          count: memoriesInjected.length,
+          always: memoriesInjected.filter((m) => m.source === "always").map((m) => m.name),
+          semantic: deduplicatedSemanticHits.map((h) => ({
+            name: h.file.frontmatter.name,
+            score: h.score,
+          })),
+        });
+      }
 
       const enriched = buildEnrichedPrompt(
         trimmed,

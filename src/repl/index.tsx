@@ -800,19 +800,43 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
 
 //  entry point 
 
+const ALT_ENTER = "\x1b[?1049h\x1b[H\x1b[2J"; // enter alt screen, cursor home, clear
+const ALT_EXIT  = "\x1b[?1049l";               // exit alt screen (restores original buffer)
+
 export async function startRepl(
   backend: BackendName,
   historyLimit: number,
   config: RiteConfig,
   resumeSessionId?: string
 ): Promise<void> {
-  const { waitUntilExit } = render(
-    <Repl
-      backend={backend}
-      historyLimit={historyLimit}
-      config={config}
-      resumeSessionId={resumeSessionId}
-    />
-  );
-  await waitUntilExit();
+  // Switch to alternate screen buffer — same UX as claude code / copilot CLI.
+  process.stdout.write(ALT_ENTER);
+
+  const cleanup = () => {
+    process.stdout.write(ALT_EXIT);
+  };
+
+  // Ensure the screen is restored on any exit path.
+  const onExit = () => cleanup();
+  const onSignal = () => { cleanup(); process.exit(0); };
+  process.once("exit", onExit);
+  process.once("SIGINT", onSignal);
+  process.once("SIGTERM", onSignal);
+
+  try {
+    const { waitUntilExit } = render(
+      <Repl
+        backend={backend}
+        historyLimit={historyLimit}
+        config={config}
+        resumeSessionId={resumeSessionId}
+      />
+    );
+    await waitUntilExit();
+  } finally {
+    cleanup();
+    process.off("exit", onExit);
+    process.off("SIGINT", onSignal);
+    process.off("SIGTERM", onSignal);
+  }
 }

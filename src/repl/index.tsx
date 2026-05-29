@@ -24,6 +24,8 @@ import {
   parseBackendTarget,
   type BackendTarget,
 } from "../settings/backends.js";
+import { updateConfig } from "../config/store.js";
+import { ApiKeyPrompt } from "./apikey-prompt.js";
 import type { BackendName, RiteConfig } from "../config/types.js";
 import type { MemoryFile } from "../memory/types.js";
 import type { Session } from "../sessions/types.js";
@@ -98,6 +100,7 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
   const [memoryIndicator, setMemoryIndicator] = useState<string | null>(null);
   const [showPicker, setShowPicker] = useState(false);
   const [pickerSessions, setPickerSessions] = useState<Session[]>([]);
+  const [showApiKeyPrompt, setShowApiKeyPrompt] = useState(false);
 
   // Refs (mutated during streaming, not tracked by React)
   const histRef = useRef(new ConversationHistory(historyLimit));
@@ -143,6 +146,13 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
   const snapToBottom = useCallback(() => {}, []);
 
   //  init 
+
+  useEffect(() => {
+    // Promote stored API key to env so SDK paths pick it up immediately.
+    if (!process.env.ANTHROPIC_API_KEY && config.anthropicApiKey) {
+      process.env.ANTHROPIC_API_KEY = config.anthropicApiKey;
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     const loaded = loadMemories();
@@ -208,7 +218,20 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
     []
   );
 
-  //  keyboard: history nav + ctrl+c + image paste 
+  const handleApiKeySave = useCallback((key: string) => {
+    const next = updateConfig("global", { anthropicApiKey: key });
+    process.env.ANTHROPIC_API_KEY = key;
+    setRuntimeConfig((c) => ({ ...c, anthropicApiKey: key }));
+    setShowApiKeyPrompt(false);
+    addCompleted({
+      id: makeId("sys"),
+      role: "system",
+      content: `API key saved to ~/.rite/config.json`,
+    });
+    void next;
+  }, [addCompleted]);
+
+  //  keyboard: history nav + ctrl+c + image paste
 
   useInput((typed, key) => {
     // ctrl+c always exits
@@ -228,9 +251,11 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
       const img = readImageFromClipboard();
       if (img) {
         setPendingImages((prev) => [...prev, img]);
+        addCompleted({ id: makeId("sys"), role: "system", content: `Image attached: ${img.label}` });
         return; // consume the keypress — don't type into the text input
       }
-      // No image on clipboard — fall through so normal text paste works
+      // No image on clipboard — tell the user so they know the key reached rite
+      addCompleted({ id: makeId("sys"), role: "system", content: "ctrl+v: no image in clipboard (if this message never appears, your terminal is consuming the key)" });
     }
 
     // Ctrl+Shift+V — clear pending images
@@ -239,7 +264,7 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
       return;
     }
 
-    if (busy || showPicker) return;
+    if (busy || showPicker || showApiKeyPrompt) return;
 
     if (key.upArrow) {
       if (inputHistory.length === 0) return;
@@ -306,6 +331,7 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
             "  /backend assistant|utility <name>",
             "  /resume           switch session",
             "  /compact          compress conversation history",
+            "  /apikey           set or update Anthropic API key",
             "  /exit             quit",
           ].join("\n"),
         });
@@ -387,6 +413,11 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
           role: "system",
           content: "History compaction complete.",
         });
+        return;
+      }
+
+      if (trimmed === "/apikey") {
+        setShowApiKeyPrompt(true);
         return;
       }
 
@@ -554,7 +585,8 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
           } else if (event.type === "tool_done") {
             const pending = pendingToolCalls.get(event.id);
             if (pending) pending.inputJson = event.inputJson ?? "";
-            setActiveTool(null);
+            // Keep activeTool showing — tool is still executing until tool_result arrives.
+            // Only update if there are multiple concurrent tools (show the most recent remaining one).
           } else if (event.type === "tool_result") {
             const pending = pendingToolCalls.get(event.id);
             if (pending) {
@@ -570,6 +602,8 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
                 durationMs: Date.now() - pending.startedAt,
               });
             }
+            // Clear activeTool only when all pending tools have finished.
+            if (pendingToolCalls.size === 0) setActiveTool(null);
           }
         }
 
@@ -680,7 +714,19 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
     ]
   );
 
-  //  session picker overlay 
+  //  api key prompt overlay
+
+  if (showApiKeyPrompt) {
+    return (
+      <ApiKeyPrompt
+        currentKey={runtimeConfig.anthropicApiKey || process.env.ANTHROPIC_API_KEY}
+        onSave={handleApiKeySave}
+        onCancel={() => setShowApiKeyPrompt(false)}
+      />
+    );
+  }
+
+  //  session picker overlay
 
   if (showPicker) {
     return (
@@ -723,7 +769,7 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
       ? `reasoned for ${(thinkingChars / 1000).toFixed(1)}k chars`
       : null;
 
-  const hasLiveArea = isWorking && !!(streamContent || thinkingPreview || thinkingSummary || activeTool);
+  const hasLiveArea = isWorking;
 
   return (
     <Box flexDirection="column">
@@ -756,6 +802,12 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
           {streamContent && (
             <Box paddingLeft={3}>
               <Text wrap="wrap">{streamContent}</Text>
+            </Box>
+          )}
+          {/* Fallback: show a spinner when busy but nothing else to display yet */}
+          {!streamContent && !thinkingPreview && !activeTool && (
+            <Box paddingLeft={3}>
+              <Text dimColor>{SPINNER[spinnerFrame]}</Text>
             </Box>
           )}
         </Box>

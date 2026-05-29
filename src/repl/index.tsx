@@ -711,28 +711,17 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
     : "";
 
   const viewportRows = termSize.rows;
-  const COMPOSER_ROWS = 5;
 
-  const liveAreaBudget = Math.max(4, viewportRows - COMPOSER_ROWS - 2);
-  const thinkingLinesBudget = streamContent ? 0 : Math.floor(liveAreaBudget / 2);
-  const streamPreviewLines = streamContent ? liveAreaBudget - 1 : liveAreaBudget - thinkingLinesBudget;
-
-  const streamPreview = streamContent
-    ? streamContent.split("\n").slice(-streamPreviewLines).join("\n")
-    : "";
-  const thinkingLines = thinkingPreview
-    ? thinkingPreview.split("\n").slice(-thinkingLinesBudget).join("\n")
-    : "";
   const thinkingSummary =
     thinkingChars > 0 && streamContent
       ? `reasoned for ${(thinkingChars / 1000).toFixed(1)}k chars`
       : null;
 
-  const hasLiveArea = isWorking && !!(streamPreview || thinkingLines || thinkingSummary || activeTool);
+  const hasLiveArea = isWorking && !!(streamContent || thinkingPreview || thinkingSummary || activeTool);
 
   return (
     <Box flexDirection="column" height={viewportRows}>
-      {/*  Message viewport — ScrollView handles measuring + clipping  */}
+      {/*  All messages + live area in one unified ScrollView  */}
       <ScrollView
         ref={scrollRef}
         flexGrow={1}
@@ -751,36 +740,34 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
         {completed.map((msg) => (
           <MessageBubble key={msg.id} message={msg} />
         ))}
-      </ScrollView>
-
-      {/*  Live area — streams thinking + response preview while busy  */}
-      {hasLiveArea && (
-        <Box flexDirection="column" marginBottom={1} flexShrink={0}>
-          <Box paddingLeft={1}>
-            <Text color="greenBright" bold>rite</Text>
+        {hasLiveArea && (
+          <Box key="__live__" flexDirection="column" marginBottom={1}>
+            <Box paddingLeft={1}>
+              <Text color="greenBright" bold>rite</Text>
+            </Box>
+            {thinkingPreview && !streamContent && (
+              <Box paddingLeft={3}>
+                <Text wrap="wrap" dimColor color="gray">{thinkingPreview}</Text>
+              </Box>
+            )}
+            {thinkingSummary && (
+              <Box paddingLeft={3}>
+                <Text dimColor>{thinkingSummary}</Text>
+              </Box>
+            )}
+            {activeTool && (
+              <Box paddingLeft={3}>
+                <Text dimColor>{SPINNER[spinnerFrame]} {activeTool}</Text>
+              </Box>
+            )}
+            {streamContent && (
+              <Box paddingLeft={3}>
+                <Text wrap="wrap" color="gray" dimColor>{streamContent}</Text>
+              </Box>
+            )}
           </Box>
-          {thinkingLines && (
-            <Box paddingLeft={3}>
-              <Text wrap="wrap" dimColor color="gray">{thinkingLines}</Text>
-            </Box>
-          )}
-          {thinkingSummary && (
-            <Box paddingLeft={3}>
-              <Text dimColor>{thinkingSummary}</Text>
-            </Box>
-          )}
-          {activeTool && (
-            <Box paddingLeft={3}>
-              <Text dimColor>{SPINNER[spinnerFrame]} {activeTool}</Text>
-            </Box>
-          )}
-          {streamPreview && (
-            <Box paddingLeft={3}>
-              <Text wrap="wrap" color="gray" dimColor>{streamPreview}</Text>
-            </Box>
-          )}
-        </Box>
-      )}
+        )}
+      </ScrollView>
 
       {/*  Composer — always at bottom  */}
       <Composer

@@ -158,20 +158,21 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
   }, []);
 
   // Mouse scroll — wire directly to ScrollView.scrollBy()
-  // Negative delta = scroll up (reveal older messages).
+  // Clamp downward scroll to getBottomOffset() to prevent over-scrolling past end.
   useEffect(() => {
     const handler = (dir: unknown) => {
-      const delta = dir === "up" ? -3 : 3;
-      if (dir === "up") atBottomRef.current = false;
-      scrollRef.current?.scrollBy(delta);
-      // Check if we scrolled back to bottom
-      if (dir === "down") {
-        setImmediate(() => {
-          const ref = scrollRef.current;
-          if (ref && ref.getScrollOffset() >= ref.getBottomOffset()) {
-            atBottomRef.current = true;
-          }
-        });
+      const ref = scrollRef.current;
+      if (!ref) return;
+      if (dir === "up") {
+        atBottomRef.current = false;
+        ref.scrollBy(-3);
+      } else {
+        const remaining = ref.getBottomOffset() - ref.getScrollOffset();
+        if (remaining <= 0) return; // already at bottom, don't scroll past
+        ref.scrollBy(Math.min(3, remaining));
+        if (ref.getScrollOffset() >= ref.getBottomOffset()) {
+          atBottomRef.current = true;
+        }
       }
     };
     process.stdin.on("mouse_scroll", handler);

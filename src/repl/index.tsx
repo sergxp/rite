@@ -785,7 +785,7 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
             )}
             {streamContent && (
               <Box paddingLeft={3}>
-                <Text wrap="wrap" color="gray" dimColor>{streamContent}</Text>
+                <Text wrap="wrap">{streamContent}</Text>
               </Box>
             )}
           </Box>

@@ -1,6 +1,5 @@
 import React, { useState, useRef, useCallback, useEffect } from "react";
-import { render, Box, Text, useApp, useInput } from "ink";
-import { ScrollView, type ScrollViewRef } from "ink-scroll-view";
+import { render, Box, Text, Static, useApp, useInput } from "ink";
 import { ConversationHistory } from "./history.js";
 import { buildEnrichedPrompt } from "./enricher.js";
 import { loadMemories } from "../memory/reader.js";
@@ -70,23 +69,15 @@ interface ReplProps {
 function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
   const { exit } = useApp();
 
-  // All completed messages rendered in the ScrollView.
+  // All completed messages — rendered via <Static> (printed once, scroll natively).
   const [completed, setCompleted] = useState<Message[]>([]);
-  const scrollRef = useRef<ScrollViewRef>(null);
-  const atBottomRef = useRef(true);
 
-  // Terminal dimensions — updated on resize so layout recalculates.
-  const [termSize, setTermSize] = useState({
-    rows: process.stdout.rows ?? 24,
-    cols: process.stdout.columns ?? 80,
-  });
   const [streamContent, setStreamContent] = useState("");
   const [thinkingChars, setThinkingChars] = useState(0);
   const [thinkingPreview, setThinkingPreview] = useState("");
   const [busy, setBusy] = useState(false);
   const [embeddingBusy, setEmbeddingBusy] = useState(false);
   const [spinnerFrame, setSpinnerFrame] = useState(0);
-  // Tool call tracking for live display
   const [activeTool, setActiveTool] = useState<string | null>(null);
 
   // Input
@@ -148,44 +139,8 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
     return () => clearInterval(t);
   }, [busy]);
 
-  //  terminal resize + mouse scroll 
-
-  useEffect(() => {
-    const onResize = () => {
-      setTermSize({ rows: process.stdout.rows ?? 24, cols: process.stdout.columns ?? 80 });
-      scrollRef.current?.remeasure();
-    };
-    process.stdout.on("resize", onResize);
-    return () => { process.stdout.off("resize", onResize); };
-  }, []);
-
-  // Mouse scroll — wire directly to ScrollView.scrollBy()
-  // Clamp downward scroll to getBottomOffset() to prevent over-scrolling past end.
-  useEffect(() => {
-    const handler = (dir: unknown) => {
-      const ref = scrollRef.current;
-      if (!ref) return;
-      if (dir === "up") {
-        atBottomRef.current = false;
-        ref.scrollBy(-3);
-      } else {
-        const remaining = ref.getBottomOffset() - ref.getScrollOffset();
-        if (remaining <= 0) return; // already at bottom, don't scroll past
-        ref.scrollBy(Math.min(3, remaining));
-        if (ref.getScrollOffset() >= ref.getBottomOffset()) {
-          atBottomRef.current = true;
-        }
-      }
-    };
-    process.stdin.on("mouse_scroll", handler);
-    return () => { process.stdin.off("mouse_scroll", handler); };
-  }, []);
-
-
-  const snapToBottom = useCallback(() => {
-    atBottomRef.current = true;
-    scrollRef.current?.scrollToBottom();
-  }, []);
+  // With Static+native scroll, content appends at bottom automatically.
+  const snapToBottom = useCallback(() => {}, []);
 
   //  init 
 
@@ -344,6 +299,7 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
           content: [
             "Commands:",
             "  /clear            clear AI context",
+            "  /copy             copy last response to clipboard",
             "  /memory           show loaded memories",
             "  /backend          show current backends",
             "  /backend <name>   set assistant backend (claude | codex | copilot)",
@@ -392,6 +348,35 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
       if (trimmed === "/resume") {
         setPickerSessions(listSessions());
         setShowPicker(true);
+        return;
+      }
+
+      if (trimmed === "/copy") {
+        // Find the last assistant message and copy to clipboard
+        const lastAsst = [...completed].reverse().find((m) => m.role === "assistant");
+        if (!lastAsst) {
+          addCompleted({ id: makeId("sys"), role: "system", content: "No assistant response to copy." });
+          return;
+        }
+        try {
+          if (process.platform === "win32") {
+            const { execFileSync } = await import("child_process");
+            execFileSync("powershell", [
+              "-NoProfile", "-NonInteractive", "-Command",
+              `Set-Clipboard -Value ${JSON.stringify(lastAsst.content)}`
+            ]);
+          } else if (process.platform === "darwin") {
+            const { execFileSync } = await import("child_process");
+            const proc = execFileSync("pbcopy", { input: lastAsst.content });
+            void proc;
+          } else {
+            const { execFileSync } = await import("child_process");
+            execFileSync("xclip", ["-selection", "clipboard"], { input: lastAsst.content });
+          }
+          addCompleted({ id: makeId("sys"), role: "system", content: "✓ Copied last response to clipboard." });
+        } catch {
+          addCompleted({ id: makeId("sys"), role: "system", content: "✗ Failed to copy — clipboard not available." });
+        }
         return;
       }
 
@@ -733,8 +718,6 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
     ? (sessionRef.current.name ?? sessionRef.current.id.slice(0, 10))
     : "";
 
-  const viewportRows = termSize.rows;
-
   const thinkingSummary =
     thinkingChars > 0 && streamContent
       ? `reasoned for ${(thinkingChars / 1000).toFixed(1)}k chars`
@@ -743,54 +726,40 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
   const hasLiveArea = isWorking && !!(streamContent || thinkingPreview || thinkingSummary || activeTool);
 
   return (
-    <Box flexDirection="column" height={viewportRows}>
-      {/*  All messages + live area in one unified ScrollView  */}
-      <ScrollView
-        ref={scrollRef}
-        flexGrow={1}
-        onScroll={(scrollTop) => {
-          const ref = scrollRef.current;
-          if (ref) {
-            atBottomRef.current = scrollTop >= ref.getBottomOffset();
-          }
-        }}
-        onContentHeightChange={() => {
-          if (atBottomRef.current) {
-            scrollRef.current?.scrollToBottom();
-          }
-        }}
-      >
-        {completed.map((msg) => (
-          <MessageBubble key={msg.id} message={msg} />
-        ))}
-        {hasLiveArea && (
-          <Box key="__live__" flexDirection="column" marginBottom={1}>
-            <Box paddingLeft={1}>
-              <Text color="greenBright" bold>rite</Text>
-            </Box>
-            {thinkingPreview && !streamContent && (
-              <Box paddingLeft={3}>
-                <Text wrap="wrap" dimColor color="gray">{thinkingPreview}</Text>
-              </Box>
-            )}
-            {thinkingSummary && (
-              <Box paddingLeft={3}>
-                <Text dimColor>{thinkingSummary}</Text>
-              </Box>
-            )}
-            {activeTool && (
-              <Box paddingLeft={3}>
-                <Text dimColor>{SPINNER[spinnerFrame]} {activeTool}</Text>
-              </Box>
-            )}
-            {streamContent && (
-              <Box paddingLeft={3}>
-                <Text wrap="wrap">{streamContent}</Text>
-              </Box>
-            )}
+    <Box flexDirection="column">
+      {/*  Completed messages — Static renders each once and they scroll up naturally */}
+      <Static items={completed}>
+        {(msg) => <MessageBubble key={msg.id} message={msg} />}
+      </Static>
+
+      {/*  Live area — re-renders in place while assistant is working  */}
+      {hasLiveArea && (
+        <Box flexDirection="column" marginBottom={1}>
+          <Box paddingLeft={1}>
+            <Text color="greenBright" bold>rite</Text>
           </Box>
-        )}
-      </ScrollView>
+          {thinkingPreview && !streamContent && (
+            <Box paddingLeft={3}>
+              <Text wrap="wrap" dimColor color="gray">{thinkingPreview}</Text>
+            </Box>
+          )}
+          {thinkingSummary && (
+            <Box paddingLeft={3}>
+              <Text dimColor>{thinkingSummary}</Text>
+            </Box>
+          )}
+          {activeTool && (
+            <Box paddingLeft={3}>
+              <Text dimColor>{SPINNER[spinnerFrame]} {activeTool}</Text>
+            </Box>
+          )}
+          {streamContent && (
+            <Box paddingLeft={3}>
+              <Text wrap="wrap">{streamContent}</Text>
+            </Box>
+          )}
+        </Box>
+      )}
 
       {/*  Composer — always at bottom  */}
       <Composer
@@ -811,64 +780,12 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
 
 //  entry point 
 
-const ALT_ENTER = "\x1b[?1049h\x1b[H\x1b[2J"; // enter alt screen, clear, cursor home
-const ALT_EXIT  = "\x1b[?1049l";               // exit alt screen → restores original buffer
-
-// Intercepts process.stdin.push() — the point where OS bytes enter the readable
-// buffer. Strips raw SGR mouse sequences before Ink reads them, and emits a
-// custom 'mouse_scroll' event on stdin that the Repl component listens to.
-function installStdinMouseFilter(): () => void {
-  const SGR_RE = /\x1b\[<\d+;\d+;\d+[Mm]/g;
-  const origPush = (process.stdin.push as (...a: unknown[]) => boolean).bind(process.stdin);
-
-  (process.stdin as unknown as Record<string, unknown>).push = function (
-    chunk: Buffer | string | null,
-    encoding?: BufferEncoding
-  ): boolean {
-    if (chunk !== null && chunk !== undefined) {
-      const str = Buffer.isBuffer(chunk) ? chunk.toString("binary") : String(chunk);
-      for (const m of str.matchAll(/\x1b\[<(\d+);\d+;\d+M/g)) {
-        const code = parseInt(m[1], 10);
-        if (code === 64) process.stdin.emit("mouse_scroll", "up");
-        else if (code === 65) process.stdin.emit("mouse_scroll", "down");
-      }
-      const filtered = str.replace(SGR_RE, "");
-      if (!filtered) return true;
-      chunk = Buffer.isBuffer(chunk) ? Buffer.from(filtered, "binary") : filtered;
-    }
-    return origPush(chunk, encoding);
-  };
-
-  return () => {
-    (process.stdin as unknown as Record<string, unknown>).push = origPush;
-  };
-}
-
 export async function startRepl(
   backend: BackendName,
   historyLimit: number,
   config: RiteConfig,
   resumeSessionId?: string
 ): Promise<void> {
-  // Enter alt screen (own buffer — original terminal content restored on exit)
-  process.stdout.write(ALT_ENTER);
-  // Enable SGR mouse reporting so scroll-wheel events reach stdin as sequences
-  process.stdout.write("\x1b[?1000h\x1b[?1006h");
-
-  const uninstall = installStdinMouseFilter();
-
-  const cleanup = () => {
-    uninstall();
-    process.stdout.write("\x1b[?1000l\x1b[?1006l"); // disable mouse reporting
-    process.stdout.write(ALT_EXIT);
-  };
-
-  const onExit = () => cleanup();
-  const onSignal = () => { cleanup(); process.exit(0); };
-  process.once("exit", onExit);
-  process.once("SIGINT", onSignal);
-  process.once("SIGTERM", onSignal);
-
   try {
     const { waitUntilExit } = render(
       <Repl
@@ -880,10 +797,8 @@ export async function startRepl(
     );
     await waitUntilExit();
   } finally {
-    cleanup();
-    process.off("exit", onExit);
-    process.off("SIGINT", onSignal);
-    process.off("SIGTERM", onSignal);
+    // Ensure cursor is visible and input is reset on exit
+    process.stdout.write("\x1b[?25h");
   }
 }
 

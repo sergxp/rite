@@ -1,6 +1,7 @@
 import React from "react";
 import { Box, Text } from "ink";
 import { MarkdownMessage } from "./markdown.js";
+import type { ImageAttachment } from "../backends/events.js";
 
 export type MessageRole = "user" | "assistant" | "system" | "thinking" | "tool_call";
 
@@ -8,6 +9,7 @@ export interface Message {
   id: string;
   role: MessageRole;
   content: string;
+  images?: ImageAttachment[];
   // tool_call metadata
   toolName?: string;
   toolInputJson?: string;
@@ -178,6 +180,13 @@ export function MessageBubble({ message }: { message: Message }) {
         <Box paddingLeft={1}>
           <Text color="cyanBright" bold>you</Text>
         </Box>
+        {message.images && message.images.length > 0 && (
+          <Box paddingLeft={3}>
+            {message.images.map((img, i) => (
+              <Text key={i} color="blueBright" dimColor>📎 {img.label}  </Text>
+            ))}
+          </Box>
+        )}
         <Box paddingLeft={3}>
           <Text wrap="wrap" color="whiteBright">{message.content}</Text>
         </Box>

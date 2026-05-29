@@ -2,9 +2,9 @@ import { callClaude } from "./claude.js";
 import { callCodex } from "./codex.js";
 import { callCopilot } from "./copilot.js";
 import type { BackendName } from "../config/types.js";
-import type { BackendEvent } from "./events.js";
-export type { BackendEvent };
-export type BackendFn = (prompt: string, signal?: AbortSignal) => AsyncIterable<BackendEvent>;
+import type { BackendEvent, ImageAttachment } from "./events.js";
+export type { BackendEvent, ImageAttachment };
+export type BackendFn = (prompt: string, signal?: AbortSignal, images?: ImageAttachment[]) => AsyncIterable<BackendEvent>;
 
 export function getBackend(name: BackendName): BackendFn {
   switch (name) {

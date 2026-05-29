@@ -1,5 +1,5 @@
 import { execa } from "execa";
-import type { BackendEvent } from "./events.js";
+import type { BackendEvent, ImageAttachment } from "./events.js";
 
 function isEnoent(err: unknown): boolean {
   return (
@@ -10,7 +10,8 @@ function isEnoent(err: unknown): boolean {
 
 export async function* callCodex(
   prompt: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  _images?: ImageAttachment[]
 ): AsyncIterable<BackendEvent> {
   const subprocess = execa("codex", ["exec", "--skip-git-repo-check", "--json", "-"], {
     reject: false,

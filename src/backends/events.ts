@@ -4,3 +4,9 @@ export type BackendEvent =
   | { type: "tool_call"; name: string; id: string }
   | { type: "tool_done"; name: string; id: string; inputJson: string }
   | { type: "tool_result"; id: string; result: string; isError: boolean };
+
+export interface ImageAttachment {
+  base64: string;
+  mediaType: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+  label: string;
+}

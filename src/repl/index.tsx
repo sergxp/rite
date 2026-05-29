@@ -19,6 +19,7 @@ import { SessionPicker } from "../sessions/picker.js";
 import { appendAuditEvent } from "../audit/writer.js";
 import { Composer } from "./composer.js";
 import { MessageBubble, type Message, type MessageRole } from "./message.js";
+import { readImageFromClipboard, type ImageAttachment } from "./image.js";
 import {
   setBackend,
   parseBackendTarget,
@@ -93,6 +94,7 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
   const [inputHistory, setInputHistory] = useState<string[]>([]);
   const [historyIdx, setHistoryIdx] = useState<number | null>(null);
   const [draft, setDraft] = useState("");
+  const [pendingImages, setPendingImages] = useState<ImageAttachment[]>([]);
 
   // App state
   const [assistantBackend, setAssistantBackend] =
@@ -251,7 +253,7 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
     []
   );
 
-  //  keyboard: history nav + ctrl+c 
+  //  keyboard: history nav + ctrl+c + image paste 
 
   useInput((typed, key) => {
     // ctrl+c always exits
@@ -263,6 +265,22 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
     // Escape cancels in-progress request
     if (key.escape && busy) {
       abortControllerRef.current?.abort();
+      return;
+    }
+
+    // Ctrl+V — check clipboard for image before letting ink-text-input handle it
+    if (key.ctrl && typed === "v") {
+      const img = readImageFromClipboard();
+      if (img) {
+        setPendingImages((prev) => [...prev, img]);
+        return; // consume the keypress — don't type into the text input
+      }
+      // No image on clipboard — fall through so normal text paste works
+    }
+
+    // Ctrl+Shift+V — clear pending images
+    if (key.ctrl && key.shift && typed === "V") {
+      setPendingImages([]);
       return;
     }
 
@@ -302,10 +320,13 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
   const handleSubmit = useCallback(
     async (value: string) => {
       const trimmed = value.trim();
+      const images = pendingImages.slice(); // capture current images
       setInput("");
       setHistoryIdx(null);
       setDraft("");
-      if (!trimmed) return;
+      setPendingImages([]); // clear attachments
+      if (!trimmed && images.length === 0) return;
+      if (!trimmed) return; // need text even with images
 
       setInputHistory((prev) => [...prev, trimmed]);
 
@@ -437,7 +458,7 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
       setActiveTool(null);
       // Snap to bottom and add user message immediately.
       snapToBottom();
-      addCompleted({ id: makeId("user"), role: "user", content: trimmed });
+      addCompleted({ id: makeId("user"), role: "user", content: trimmed, images: images.length > 0 ? images : undefined });
 
       const abortController = new AbortController();
       abortControllerRef.current = abortController;
@@ -532,7 +553,7 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
 
       try {
         const backendFn = getBackend(assistantBackend);
-        for await (const event of backendFn(enriched, abortController.signal)) {
+        for await (const event of backendFn(enriched, abortController.signal, images.length > 0 ? images : undefined)) {
           if (event.type === "text") {
             flushThinking();
             fullResponse += event.content;
@@ -670,6 +691,7 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
       addCompleted,
       snapToBottom,
       exit,
+      pendingImages,
     ]
   );
 
@@ -781,6 +803,7 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
         memoryCount={alwaysMemories.length}
         memoryIndicator={memoryIndicator}
         session={sessionLabel}
+        pendingImageCount={pendingImages.length}
       />
     </Box>
   );

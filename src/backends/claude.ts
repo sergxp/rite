@@ -3,7 +3,7 @@ import { execa } from "execa";
 import { existsSync, mkdirSync, writeFileSync } from "fs";
 import { join } from "path";
 import os from "os";
-import type { BackendEvent } from "./events.js";
+import type { BackendEvent, ImageAttachment } from "./events.js";
 
 function isEnoent(err: unknown): boolean {
   return (
@@ -105,10 +105,49 @@ export async function callClaudeBlocking(
   }
 }
 
-export async function* callClaude(
+/** Stream a Claude response using the Anthropic SDK directly (supports vision). */
+async function* callClaudeSdk(
   prompt: string,
+  images: ImageAttachment[],
   signal?: AbortSignal
 ): AsyncIterable<BackendEvent> {
+  const client = getAnthropicClient();
+  if (!client) {
+    yield { type: "text", content: "No ANTHROPIC_API_KEY set — cannot use vision." };
+    return;
+  }
+
+  const imageBlocks: Anthropic.ImageBlockParam[] = images.map((img) => ({
+    type: "image",
+    source: { type: "base64", media_type: img.mediaType, data: img.base64 },
+  }));
+
+  const stream = await client.messages.create({
+    model: "claude-opus-4-5",
+    max_tokens: 8096,
+    messages: [{ role: "user", content: [...imageBlocks, { type: "text", text: prompt }] }],
+    stream: true,
+  }, { signal });
+
+  for await (const event of stream) {
+    if (event.type === "content_block_delta") {
+      if (event.delta.type === "text_delta") {
+        yield { type: "text", content: event.delta.text };
+      }
+    }
+  }
+}
+
+export async function* callClaude(
+  prompt: string,
+  signal?: AbortSignal,
+  images?: ImageAttachment[]
+): AsyncIterable<BackendEvent> {
+  if (images && images.length > 0) {
+    yield* callClaudeSdk(prompt, images, signal);
+    return;
+  }
+
   const subprocess = execa(
     "claude",
     ["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages"],

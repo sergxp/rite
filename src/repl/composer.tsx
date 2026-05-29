@@ -14,6 +14,7 @@ export interface ComposerProps {
   memoryCount?: number;
   memoryIndicator?: string | null;
   session?: string;
+  pendingImageCount?: number;
 }
 
 export function Composer({
@@ -26,6 +27,7 @@ export function Composer({
   memoryCount = 0,
   memoryIndicator,
   session,
+  pendingImageCount = 0,
 }: ComposerProps) {
   const [frame, setFrame] = useState(0);
 
@@ -87,6 +89,14 @@ export function Composer({
           placeholder="Ask anything..."
         />
       </Box>
+
+      {/* Image attachment indicator */}
+      {pendingImageCount > 0 && (
+        <Box paddingX={2}>
+          <Text color="blueBright">📎 {pendingImageCount} image{pendingImageCount > 1 ? "s" : ""} attached</Text>
+          <Text dimColor>  (ctrl+shift+v to remove)</Text>
+        </Box>
+      )}
 
       {/* Hints */}
       <Box paddingX={2}>

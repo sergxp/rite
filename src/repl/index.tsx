@@ -25,6 +25,7 @@ import {
   type BackendTarget,
 } from "../settings/backends.js";
 import { updateConfig } from "../config/store.js";
+import { setRiteApiKey } from "../backends/claude.js";
 import { ApiKeyPrompt } from "./apikey-prompt.js";
 import { setPasteHandler, installBracketedPaste, uninstallBracketedPaste } from "./paste.js";
 import type { BackendName, RiteConfig } from "../config/types.js";
@@ -150,10 +151,11 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
   //  init 
 
   useEffect(() => {
-    // Promote stored API key to env so SDK paths pick it up immediately.
-    if (!process.env.ANTHROPIC_API_KEY && config.anthropicApiKey) {
-      process.env.ANTHROPIC_API_KEY = config.anthropicApiKey;
-    }
+    // Load stored API key into the SDK module (image-only path).
+    // We deliberately do NOT write to process.env to prevent leaking the key
+    // to claude CLI subprocesses or any other child process.
+    const key = config.anthropicApiKey || process.env.ANTHROPIC_API_KEY;
+    if (key) setRiteApiKey(key);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
@@ -230,7 +232,7 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
 
   const handleApiKeySave = useCallback((key: string) => {
     const next = updateConfig("global", { anthropicApiKey: key });
-    process.env.ANTHROPIC_API_KEY = key;
+    setRiteApiKey(key); // SDK-only; not written to process.env
     setRuntimeConfig((c) => ({ ...c, anthropicApiKey: key }));
     setShowApiKeyPrompt(false);
     addCompleted({

@@ -14,9 +14,19 @@ function isEnoent(err: unknown): boolean {
 
 let cachedClient: Anthropic | null = null;
 let cachedApiKey = "";
+// rite-owned API key — only used for SDK calls (vision/image). Never written to process.env
+// so it doesn't leak to claude CLI subprocesses or any other child process.
+let riteApiKey = "";
+
+export function setRiteApiKey(key: string): void {
+  riteApiKey = key.trim();
+  // Invalidate cached client so it's rebuilt with the new key on next use.
+  cachedClient = null;
+  cachedApiKey = "";
+}
 
 function resolveApiKey(apiKey?: string): string {
-  return apiKey?.trim() || process.env.ANTHROPIC_API_KEY?.trim() || "";
+  return apiKey?.trim() || riteApiKey || "";
 }
 
 function getAnthropicClient(apiKey?: string): Anthropic | null {

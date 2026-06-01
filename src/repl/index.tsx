@@ -26,6 +26,7 @@ import {
 } from "../settings/backends.js";
 import { updateConfig } from "../config/store.js";
 import { ApiKeyPrompt } from "./apikey-prompt.js";
+import { setPasteHandler, installBracketedPaste, uninstallBracketedPaste } from "./paste.js";
 import type { BackendName, RiteConfig } from "../config/types.js";
 import type { MemoryFile } from "../memory/types.js";
 import type { Session } from "../sessions/types.js";
@@ -101,6 +102,7 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
   const [showPicker, setShowPicker] = useState(false);
   const [pickerSessions, setPickerSessions] = useState<Session[]>([]);
   const [showApiKeyPrompt, setShowApiKeyPrompt] = useState(false);
+  const [pastedContent, setPastedContent] = useState<string | null>(null);
 
   // Refs (mutated during streaming, not tracked by React)
   const histRef = useRef(new ConversationHistory(historyLimit));
@@ -188,6 +190,14 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
     // No else branch — session is created lazily on first message submit.
   }, [config, resumeSessionId]);
 
+  // Register paste handler once — paste.ts intercepts bracketed paste sequences
+  // before Ink sees them, so the full paste lands here in one setState call.
+  useEffect(() => {
+    setPasteHandler((text) => {
+      setPastedContent(text);
+    });
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   //  helpers 
 
   const addCompleted = useCallback((msg: Message) => {
@@ -240,9 +250,15 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
       return;
     }
 
-    // Escape cancels in-progress request
-    if (key.escape && busy) {
-      abortControllerRef.current?.abort();
+    // Escape: clear paste first; if no paste, cancel in-progress request
+    if (key.escape) {
+      if (pastedContent) {
+        setPastedContent(null);
+        return;
+      }
+      if (busy) {
+        abortControllerRef.current?.abort();
+      }
       return;
     }
 
@@ -299,14 +315,25 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
 
   const handleSubmit = useCallback(
     async (value: string) => {
-      const trimmed = value.trim();
+      const typed = value.trim();
+      const pasted = pastedContent; // capture before clearing
       const images = pendingImages.slice(); // capture current images
       setInput("");
       setHistoryIdx(null);
       setDraft("");
-      setPendingImages([]); // clear attachments
+      setPendingImages([]);
+      setPastedContent(null);
+
+      // Combine typed text with pasted content; slash commands ignore paste
+      const trimmed =
+        typed.startsWith("/") || !pasted
+          ? typed
+          : typed
+          ? typed + "\n\n" + pasted
+          : pasted;
+
       if (!trimmed && images.length === 0) return;
-      if (!trimmed) return; // need text even with images
+      if (!trimmed) return;
 
       setInputHistory((prev) => [...prev, trimmed]);
 
@@ -711,6 +738,7 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
       snapToBottom,
       exit,
       pendingImages,
+      pastedContent,
     ]
   );
 
@@ -825,6 +853,8 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
         memoryIndicator={memoryIndicator}
         session={sessionLabel}
         pendingImageCount={pendingImages.length}
+        pastedContent={pastedContent}
+        onClearPaste={() => setPastedContent(null)}
       />
     </Box>
   );
@@ -838,6 +868,7 @@ export async function startRepl(
   config: RiteConfig,
   resumeSessionId?: string
 ): Promise<void> {
+  installBracketedPaste(); // must run before render() so stdin is patched before Ink reads it
   try {
     const { waitUntilExit } = render(
       <Repl
@@ -849,8 +880,8 @@ export async function startRepl(
     );
     await waitUntilExit();
   } finally {
-    // Ensure cursor is visible and input is reset on exit
-    process.stdout.write("\x1b[?25h");
+    uninstallBracketedPaste();
+    process.stdout.write("\x1b[?25h"); // restore cursor
   }
 }
 

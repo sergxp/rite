@@ -15,6 +15,8 @@ export interface ComposerProps {
   memoryIndicator?: string | null;
   session?: string;
   pendingImageCount?: number;
+  pastedContent?: string | null;
+  onClearPaste?: () => void;
 }
 
 export function Composer({
@@ -28,6 +30,8 @@ export function Composer({
   memoryIndicator,
   session,
   pendingImageCount = 0,
+  pastedContent,
+  onClearPaste: _onClearPaste,
 }: ComposerProps) {
   const [frame, setFrame] = useState(0);
 
@@ -89,6 +93,16 @@ export function Composer({
           placeholder="Ask anything..."
         />
       </Box>
+
+      {/* Paste badge */}
+      {pastedContent && (
+        <Box paddingX={2}>
+          <Text color="magentaBright">
+            {pastedContent.length} chars · {pastedContent.split("\n").length} lines pasted
+          </Text>
+          <Text dimColor>  esc to clear</Text>
+        </Box>
+      )}
 
       {/* Image attachment indicator */}
       {pendingImageCount > 0 && (

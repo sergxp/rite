@@ -195,13 +195,23 @@ export function MessageBubble({ message }: { message: Message }) {
   }
 
   // assistant
+  const STEP_SEP = "\n\n---\n\n";
+  const responseParts = message.content.split(STEP_SEP);
+  const interimSteps = responseParts.slice(0, -1);
+  const finalResponse = responseParts[responseParts.length - 1];
+
   return (
     <Box flexDirection="column" marginBottom={1}>
       <Box paddingLeft={1}>
         <Text color="greenBright" bold>rite</Text>
       </Box>
+      {interimSteps.map((step, i) => (
+        <Box key={i} paddingLeft={3} marginBottom={1}>
+          <Text wrap="wrap" color="gray" dimColor>{step.trim()}</Text>
+        </Box>
+      ))}
       <Box paddingLeft={3}>
-        <MarkdownMessage content={message.content} />
+        <MarkdownMessage content={finalResponse} />
       </Box>
     </Box>
   );

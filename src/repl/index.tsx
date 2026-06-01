@@ -111,25 +111,17 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
   const liveRef = useRef("");
   const thinkingRef = useRef({ chars: 0, text: "" });
   const abortControllerRef = useRef<AbortController | null>(null);
+  // Always-current mirrors of state values used in the useInput handler to avoid stale closures.
+  const busyRef = useRef(busy);
+  busyRef.current = busy;
+  const pastedContentRef = useRef<string | null>(null);
+  pastedContentRef.current = pastedContent;
 
-  //  spinner 
+  //  spinner + streaming poll (merged to reduce re-renders)
 
   useEffect(() => {
     if (!busy && !embeddingBusy) {
       setSpinnerFrame(0);
-      return;
-    }
-    const t = setInterval(
-      () => setSpinnerFrame((f) => (f + 1) % SPINNER.length),
-      80
-    );
-    return () => clearInterval(t);
-  }, [busy, embeddingBusy]);
-
-  //  streaming poll
-
-  useEffect(() => {
-    if (!busy) {
       liveRef.current = "";
       thinkingRef.current = { chars: 0, text: "" };
       setStreamContent("");
@@ -137,13 +129,32 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
       setThinkingPreview("");
       return;
     }
+    let lastContent = "";
+    let lastThinkingChars = 0;
+    let lastThinkingPreview = "";
     const t = setInterval(() => {
-      setStreamContent(liveRef.current);
-      setThinkingChars(thinkingRef.current.chars);
-      setThinkingPreview(thinkingRef.current.text);
-    }, 60);
+      // Advance spinner every tick.
+      setSpinnerFrame((f) => (f + 1) % SPINNER.length);
+      // Only push content state updates when the value actually changed —
+      // avoids a re-render (and terminal cursor jump) on every tick.
+      const content = liveRef.current;
+      if (content !== lastContent) {
+        lastContent = content;
+        setStreamContent(content);
+      }
+      const chars = thinkingRef.current.chars;
+      if (chars !== lastThinkingChars) {
+        lastThinkingChars = chars;
+        setThinkingChars(chars);
+      }
+      const preview = thinkingRef.current.text;
+      if (preview !== lastThinkingPreview) {
+        lastThinkingPreview = preview;
+        setThinkingPreview(preview);
+      }
+    }, 150);
     return () => clearInterval(t);
-  }, [busy]);
+  }, [busy, embeddingBusy]);
 
   // With Static+native scroll, content appends at bottom automatically.
   const snapToBottom = useCallback(() => {}, []);
@@ -254,11 +265,11 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
 
     // Escape: clear paste first; if no paste, cancel in-progress request
     if (key.escape) {
-      if (pastedContent) {
+      if (pastedContentRef.current) {
         setPastedContent(null);
         return;
       }
-      if (busy) {
+      if (busyRef.current) {
         abortControllerRef.current?.abort();
       }
       return;
@@ -674,9 +685,21 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
           saveSession(s);
 
           if (isFirstTurn && s.name == null) {
-            void autoNameSession(s.id, trimmed, fullResponse, runtimeConfig);
+            void autoNameSession(s.id, trimmed, fullResponse, runtimeConfig, (name) => {
+              // Keep the in-memory session object in sync — without this, the next
+              // saveSession(s) call would overwrite the disk file with name: null.
+              if (sessionRef.current?.id === s.id) {
+                sessionRef.current.name = name;
+              }
+            });
           }
         }
+
+        appendAuditEvent(sessionId, "response_received", {
+          rawResponse: fullResponse,
+          backend: assistantBackend,
+          charCount: fullResponse.length,
+        });
 
         pendingMsg = { id: makeId("asst"), role: "assistant", content: fullResponse };
 
@@ -711,6 +734,7 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
         }
       } finally {
         abortControllerRef.current = null;
+        // Flush any tool calls that never received a result (e.g. on abort).
         for (const [, pending] of pendingToolCalls) {
           addCompleted({
             id: makeId("tool"),
@@ -799,6 +823,18 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
       ? `reasoned for ${(thinkingChars / 1000).toFixed(1)}k chars`
       : null;
 
+  // Limit the live streaming preview to a fixed number of lines so the dynamic
+  // area never grows unboundedly — a growing live area means Ink erases more lines
+  // each re-render, causing the terminal cursor to jump further up and fighting
+  // the user's scroll position (the "snap" bug).
+  const LIVE_PREVIEW_LINES = 12;
+  const streamPreview = (() => {
+    if (!streamContent) return "";
+    const lines = streamContent.split("\n");
+    if (lines.length <= LIVE_PREVIEW_LINES) return streamContent;
+    return lines.slice(-LIVE_PREVIEW_LINES).join("\n");
+  })();
+
   const hasLiveArea = isWorking;
 
   return (
@@ -814,9 +850,16 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
           <Box paddingLeft={1}>
             <Text color="greenBright" bold>rite</Text>
           </Box>
-          {thinkingPreview && !streamContent && (
+          {thinkingPreview && !streamPreview && (
             <Box paddingLeft={3}>
-              <Text wrap="wrap" dimColor color="gray">{thinkingPreview}</Text>
+              <Text wrap="wrap" dimColor color="gray">{
+                (() => {
+                  const lines = thinkingPreview.split("\n");
+                  return lines.length <= LIVE_PREVIEW_LINES
+                    ? thinkingPreview
+                    : lines.slice(-LIVE_PREVIEW_LINES).join("\n");
+                })()
+              }</Text>
             </Box>
           )}
           {thinkingSummary && (
@@ -829,13 +872,13 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
               <Text dimColor>{SPINNER[spinnerFrame]} {activeTool}</Text>
             </Box>
           )}
-          {streamContent && (
+          {streamPreview && (
             <Box paddingLeft={3}>
-              <Text wrap="wrap">{streamContent}</Text>
+              <Text wrap="wrap">{streamPreview}</Text>
             </Box>
           )}
           {/* Fallback: show a spinner when busy but nothing else to display yet */}
-          {!streamContent && !thinkingPreview && !activeTool && (
+          {!streamPreview && !thinkingPreview && !activeTool && (
             <Box paddingLeft={3}>
               <Text dimColor>{SPINNER[spinnerFrame]}</Text>
             </Box>

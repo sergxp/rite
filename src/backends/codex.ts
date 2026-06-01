@@ -37,6 +37,7 @@ export async function* callCodex(
   }
 
   let buffer = "";
+  const state = { textCount: 0 };
   try {
     for await (const chunk of subprocess.stdout) {
       buffer += chunk.toString();
@@ -46,7 +47,7 @@ export async function* callCodex(
 
       for (const line of lines) {
         if (!line.trim()) continue;
-        const event = parseCodexEvent(line);
+        const event = parseCodexEvent(line, state);
         if (event) yield event;
       }
     }
@@ -58,14 +59,14 @@ export async function* callCodex(
   }
 
   if (buffer.trim()) {
-    const event = parseCodexEvent(buffer);
+    const event = parseCodexEvent(buffer, state);
     if (event) yield event;
   }
 
   await subprocess;
 }
 
-function parseCodexEvent(line: string): BackendEvent | null {
+function parseCodexEvent(line: string, state: { textCount: number }): BackendEvent | null {
   try {
     const event = JSON.parse(line) as Record<string, unknown>;
     const item = event.item as Record<string, unknown> | undefined;
@@ -83,13 +84,17 @@ function parseCodexEvent(line: string): BackendEvent | null {
     // item.completed: tool call done or text response
     if (event.type === "item.completed" && item) {
       if (item.type === "function_call") {
-        const name = typeof item.name === "string" ? item.name : "tool";
         const id = (typeof item.call_id === "string" ? item.call_id : null)
           ?? (typeof item.id === "string" ? item.id : "?");
-        return { type: "tool_done", name, id };
+        // Emit tool_result so the tool call gets committed to completed immediately.
+        // Codex runs tools internally so the result text isn't exposed; use empty string.
+        return { type: "tool_result", id, result: "", isError: false };
       }
       if (item.type === "agent_message" && typeof item.text === "string" && item.text) {
-        return { type: "text", content: item.text };
+        state.textCount++;
+        // Prefix second+ agent turns with a separator so intermediate steps render gray.
+        const prefix = state.textCount > 1 ? "\n\n---\n\n" : "";
+        return { type: "text", content: prefix + item.text };
       }
     }
 
@@ -100,10 +105,11 @@ function parseCodexEvent(line: string): BackendEvent | null {
 }
 
 function extractCodexTextFromOutput(stdout: string): string {
+  const state = { textCount: 0 };
   return stdout
     .split(/\r?\n/)
     .map((line) => {
-      const event = parseCodexEvent(line);
+      const event = parseCodexEvent(line, state);
       return event?.type === "text" ? event.content : null;
     })
     .filter((v): v is string => Boolean(v))

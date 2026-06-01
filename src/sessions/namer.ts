@@ -14,12 +14,14 @@ RULES:
 /**
  * Generate a short LLM-derived name for a session from its first turn,
  * then persist it. Runs in the background — errors are silently swallowed.
+ * onNamed is called with the final name so callers can update in-memory state.
  */
 export async function autoNameSession(
   sessionId: string,
   userMessage: string,
   assistantResponse: string,
-  config: RiteConfig
+  config: RiteConfig,
+  onNamed?: (name: string) => void
 ): Promise<void> {
   try {
     const prompt = [
@@ -47,6 +49,7 @@ export async function autoNameSession(
 
     if (name) {
       renameSession(sessionId, name);
+      onNamed?.(name);
     }
   } catch {
     // Best-effort — never crash the REPL over a session name.

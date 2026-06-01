@@ -183,6 +183,10 @@ export async function* callClaude(
   const toolBlocks = new Map<number, { name: string; id: string; inputJson: string }>();
   const thinkingBlocks = new Set<number>();
 
+  // Track message turns so we can inject a separator between multi-turn responses.
+  let assistantMessageCount = 0;
+  let hasEmittedText = false;
+
   let buffer = "";
   try {
     for await (const chunk of subprocess.stdout) {
@@ -231,6 +235,12 @@ export async function* callClaude(
         const inner = event.event as Record<string, unknown> | undefined;
         if (!inner) continue;
 
+        // Count assistant message turns so we can detect multi-turn agentic responses.
+        if (inner.type === "message_start") {
+          assistantMessageCount++;
+          continue;
+        }
+
         if (inner.type === "content_block_start") {
           const index = inner.index as number;
           const block = inner.content_block as Record<string, unknown> | undefined;
@@ -241,6 +251,10 @@ export async function* callClaude(
             yield { type: "tool_call", name, id };
           } else if (block?.type === "thinking") {
             thinkingBlocks.add(index);
+          } else if (block?.type === "text" && assistantMessageCount > 1 && hasEmittedText) {
+            // New text block in a subsequent assistant turn — inject a horizontal rule
+            // so each agent step is visually separated rather than running together.
+            yield { type: "text", content: "\n\n---\n\n" };
           }
           continue;
         }
@@ -275,6 +289,7 @@ export async function* callClaude(
             continue;
           }
           if (delta?.type === "text_delta" && typeof delta.text === "string") {
+            hasEmittedText = true;
             yield { type: "text", content: delta.text };
           }
           continue;

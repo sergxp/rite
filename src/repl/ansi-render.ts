@@ -32,13 +32,26 @@ function visLen(s: string): number {
  * Word-wrap ANSI-annotated text so it never exceeds termWidth columns.
  * The first line is returned without a leading indent (caller adds it).
  * Continuation lines are prefixed with `indent`.
+ *
+ * Hard newlines in the input (e.g. from markdown `br` tokens) are preserved
+ * as hard breaks rather than being treated as regular whitespace — otherwise
+ * `\n  ` from the agent's soft line breaks embeds a newline mid-string and
+ * causes continuation lines to have inconsistent leading whitespace.
  */
 function wrapAnsi(text: string, indent: string): string {
   const termWidth = (process.stdout.columns ?? 80) - 2; // 2-col safety margin
   const maxWidth = termWidth - visLen(indent);
   if (maxWidth < 20) return text; // too narrow to wrap sensibly
 
-  // Split on whitespace runs, keeping them as tokens so we can reassemble
+  // Split on hard newlines first so they are preserved as true line breaks
+  // rather than being swallowed into a whitespace token mid-line.
+  return text
+    .split(/\n/)
+    .map((segment) => wrapSegment(segment.trimStart(), indent, maxWidth))
+    .join(`\n${indent}`);
+}
+
+function wrapSegment(text: string, indent: string, maxWidth: number): string {
   const tokens = text.split(/(\s+)/);
   const lines: string[] = [];
   let line = "";
@@ -47,8 +60,7 @@ function wrapAnsi(text: string, indent: string): string {
   for (const token of tokens) {
     const tokenVis = visLen(token);
     if (lineVis + tokenVis > maxWidth && lineVis > 0) {
-      lines.push(line);
-      // Trim leading whitespace for the new line
+      lines.push(line.trimEnd());
       const trimmed = token.replace(/^\s+/, "");
       line = trimmed;
       lineVis = visLen(trimmed);
@@ -57,7 +69,7 @@ function wrapAnsi(text: string, indent: string): string {
       lineVis += tokenVis;
     }
   }
-  if (line) lines.push(line);
+  if (line) lines.push(line.trimEnd());
 
   return lines.join(`\n${indent}`);
 }
@@ -247,7 +259,7 @@ function blk(tokens: BT[], indent = INDENT): string {
     }
   });
 
-  return parts.join("\n");
+  return parts.join("\n\n");
 }
 
 // ---- public API ----

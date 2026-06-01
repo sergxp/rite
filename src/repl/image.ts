@@ -26,7 +26,7 @@ function readClipboardWindows(): ImageAttachment | null {
   try {
     const result = execFileSync(
       "powershell",
-      ["-NoProfile", "-NonInteractive", "-Command", script],
+      ["-STA", "-NoProfile", "-NonInteractive", "-Command", script],
       { timeout: 5000, stdio: ["pipe", "pipe", "pipe"] }
     );
     const base64 = result.toString().trim();

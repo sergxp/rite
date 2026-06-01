@@ -116,6 +116,11 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
   busyRef.current = busy;
   const pastedContentRef = useRef<string | null>(null);
   pastedContentRef.current = pastedContent;
+  const inputRef = useRef(input);
+  inputRef.current = input;
+  // Type-ahead queue: messages typed while busy, auto-submitted when task finishes.
+  const messageQueueRef = useRef<string[]>([]);
+  const [queuedCount, setQueuedCount] = useState(0);
 
   //  spinner + streaming poll (merged to reduce re-renders)
 
@@ -158,6 +163,17 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
 
   // With Static+native scroll, content appends at bottom automatically.
   const snapToBottom = useCallback(() => {}, []);
+
+  // Type-ahead queue drain: when busy transitions to false, auto-submit the next queued message.
+  useEffect(() => {
+    if (busy) return;
+    const next = messageQueueRef.current.shift();
+    if (next) {
+      setQueuedCount(messageQueueRef.current.length);
+      void handleSubmit(next);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [busy]);
 
   //  init 
 
@@ -263,14 +279,23 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
       return;
     }
 
-    // Escape: clear paste first; if no paste, cancel in-progress request
+    // Escape: clear paste first; if busy and input has text, queue it (type-ahead);
+    // if busy and no text, cancel in-progress request; if idle, no-op.
     if (key.escape) {
       if (pastedContentRef.current) {
         setPastedContent(null);
         return;
       }
       if (busyRef.current) {
-        abortControllerRef.current?.abort();
+        const current = inputRef.current.trim();
+        if (current) {
+          messageQueueRef.current.push(current);
+          setQueuedCount(messageQueueRef.current.length);
+          setInput("");
+        } else {
+          abortControllerRef.current?.abort();
+        }
+        return;
       }
       return;
     }
@@ -347,6 +372,13 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
 
       if (!trimmed && images.length === 0) return;
       if (!trimmed) return;
+
+      // While busy: queue the message for auto-submission after current task finishes.
+      if (busyRef.current) {
+        messageQueueRef.current.push(trimmed);
+        setQueuedCount(messageQueueRef.current.length);
+        return;
+      }
 
       setInputHistory((prev) => [...prev, trimmed]);
 
@@ -900,6 +932,7 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
         pendingImageCount={pendingImages.length}
         pastedContent={pastedContent}
         onClearPaste={() => setPastedContent(null)}
+        queuedCount={queuedCount}
       />
     </Box>
   );

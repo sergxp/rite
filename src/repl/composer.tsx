@@ -17,6 +17,7 @@ export interface ComposerProps {
   pendingImageCount?: number;
   pastedContent?: string | null;
   onClearPaste?: () => void;
+  queuedCount?: number;
 }
 
 export function Composer({
@@ -32,6 +33,7 @@ export function Composer({
   pendingImageCount = 0,
   pastedContent,
   onClearPaste: _onClearPaste,
+  queuedCount = 0,
 }: ComposerProps) {
   const [frame, setFrame] = useState(0);
 
@@ -89,8 +91,8 @@ export function Composer({
           value={value}
           onChange={onChange}
           onSubmit={onSubmit}
-          focus={!busy}
-          placeholder="Ask anything..."
+          focus={true}
+          placeholder={busy ? "Type next message..." : "Ask anything..."}
         />
       </Box>
 
@@ -112,11 +114,20 @@ export function Composer({
         </Box>
       )}
 
+      {/* Queue indicator */}
+      {queuedCount > 0 && (
+        <Box paddingX={2}>
+          <Text color="yellowBright">↑ {queuedCount} message{queuedCount > 1 ? "s" : ""} queued</Text>
+        </Box>
+      )}
+
       {/* Hints */}
       <Box paddingX={2}>
         <Text dimColor>
           {busy
-            ? "esc cancel  ctrl+c exit"
+            ? value.trim()
+              ? "enter/esc queue  ctrl+c exit"
+              : "esc cancel  ctrl+c exit"
             : "enter send  up/down history  ctrl+c exit  /help /clear /memory /backend /resume"}
         </Text>
       </Box>

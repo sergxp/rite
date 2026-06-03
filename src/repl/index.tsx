@@ -1,5 +1,5 @@
 import React, { useState, useRef, useCallback, useEffect, useMemo } from "react";
-import { render, Box, Text, useApp, useInput } from "ink";
+import { render, Box, Text, useApp, useInput, useStdin } from "ink";
 import { ConversationHistory } from "./history.js";
 import { buildEnrichedPrompt } from "./enricher.js";
 import { loadMemories } from "../memory/reader.js";
@@ -41,6 +41,34 @@ function makeId(prefix: string) {
 }
 
 const SPINNER = ["|", "/", "-", "\\", "|", "/", "-", "\\", "|", "/"];
+
+// SGR mouse scroll: filter raw mouse escape bytes from stdin so Ink never sees them,
+// and emit a custom 'mouse_scroll' event that the REPL component listens for.
+const SGR_MOUSE_RE = /\x1b\[<\d+;\d+;\d+[Mm]/g;
+
+function installStdinMouseFilter(): () => void {
+  const origPush = (process.stdin.push as (...a: unknown[]) => boolean).bind(process.stdin);
+  (process.stdin as unknown as Record<string, unknown>).push = function (
+    chunk: Buffer | string | null,
+    encoding?: BufferEncoding
+  ): boolean {
+    if (chunk !== null) {
+      const str = Buffer.isBuffer(chunk) ? chunk.toString("binary") : String(chunk);
+      for (const m of str.matchAll(/\x1b\[<(\d+);\d+;\d+M/g)) {
+        const code = parseInt(m[1], 10);
+        if (code === 64) process.stdin.emit("mouse_scroll", "up");
+        else if (code === 65) process.stdin.emit("mouse_scroll", "down");
+      }
+      const filtered = str.replace(SGR_MOUSE_RE, "");
+      if (!filtered) return true;
+      chunk = Buffer.isBuffer(chunk) ? Buffer.from(filtered, "binary") : filtered;
+    }
+    return origPush(chunk, encoding);
+  } as typeof process.stdin.push;
+  return () => {
+    (process.stdin as unknown as Record<string, unknown>).push = origPush;
+  };
+}
 
 function isValidBackend(s: string): s is BackendName {
   return s === "claude" || s === "codex" || s === "copilot";
@@ -121,6 +149,23 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
       if (atBottomRef.current) setScrollOffset(0);
     }
   }, [completed.length]);
+
+  // Mouse wheel scroll — events emitted by installStdinMouseFilter() in startRepl
+  const { stdin } = useStdin();
+  useEffect(() => {
+    if (!stdin) return;
+    const SCROLL_STEP = 3;
+    const handler = (direction: "up" | "down") => {
+      if (direction === "up") {
+        setScrollOffset((prev) => Math.min(Math.max(0, completed.length - 1), prev + SCROLL_STEP));
+      } else {
+        setScrollOffset((prev) => Math.max(0, prev - SCROLL_STEP));
+      }
+    };
+    (stdin as NodeJS.EventEmitter).on("mouse_scroll", handler);
+    return () => { (stdin as NodeJS.EventEmitter).off("mouse_scroll", handler); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stdin, completed.length]);
 
   const [streamContent, setStreamContent] = useState("");
   const [thinkingChars, setThinkingChars] = useState(0);
@@ -1060,7 +1105,9 @@ export async function startRepl(
   resumeSessionId?: string
 ): Promise<void> {
   installBracketedPaste(); // must run before render() so stdin is patched before Ink reads it
+  const uninstallMouseFilter = installStdinMouseFilter(); // filter SGR mouse bytes before Ink reads them
   process.stdout.write("\x1b[?1049h"); // enter alt screen
+  process.stdout.write("\x1b[?1000h\x1b[?1006h"); // enable SGR mouse (scroll wheel events)
   process.stdout.write("\x1b[2J\x1b[H"); // clear alt screen, cursor to top-left
   try {
     const { waitUntilExit } = render(
@@ -1073,7 +1120,9 @@ export async function startRepl(
     );
     await waitUntilExit();
   } finally {
+    uninstallMouseFilter();
     uninstallBracketedPaste();
+    process.stdout.write("\x1b[?1000l\x1b[?1006l"); // disable SGR mouse
     process.stdout.write("\x1b[?25h"); // restore cursor
     process.stdout.write("\x1b[?1049l"); // exit alt screen (restores previous terminal content)
   }

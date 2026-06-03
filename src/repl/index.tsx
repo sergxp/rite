@@ -127,8 +127,17 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
     if (!stdin) return;
     const SCROLL_STEP = 2; // lines per wheel tick for smooth feel
     const handler = (direction: "up" | "down") => {
-      if (direction === "up") scrollRef.current?.scrollBy(-SCROLL_STEP);
-      else scrollRef.current?.scrollBy(SCROLL_STEP);
+      const ref = scrollRef.current;
+      if (!ref) return;
+      if (direction === "up") {
+        // clamp at top (offset 0)
+        const next = Math.max(0, ref.getScrollOffset() - SCROLL_STEP);
+        ref.scrollTo(next);
+      } else {
+        // clamp at bottom
+        const next = Math.min(ref.getBottomOffset(), ref.getScrollOffset() + SCROLL_STEP);
+        ref.scrollTo(next);
+      }
     };
     (stdin as NodeJS.EventEmitter).on("mouse_scroll", handler);
     return () => { (stdin as NodeJS.EventEmitter).off("mouse_scroll", handler); };

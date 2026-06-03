@@ -849,50 +849,7 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
     ]
   );
 
-  //  api key prompt overlay
-
-  if (showApiKeyPrompt) {
-    return (
-      <ApiKeyPrompt
-        currentKey={runtimeConfig.anthropicApiKey || process.env.ANTHROPIC_API_KEY}
-        onSave={handleApiKeySave}
-        onCancel={() => setShowApiKeyPrompt(false)}
-      />
-    );
-  }
-
-  //  session picker overlay
-
-  if (showPicker) {
-    return (
-      <SessionPicker
-        sessions={pickerSessions}
-        onSelect={(resumed) => {
-          setShowPicker(false);
-          sessionRef.current = resumed;
-          setAssistantBackend(resumed.backend);
-          setRuntimeConfig((c) => ({ ...c, backend: resumed.backend }));
-          histRef.current.clear();
-          for (const t of resumed.turns) histRef.current.add(t.role, t.content);
-          resumed.updatedAt = new Date().toISOString();
-          saveSession(resumed);
-          refreshMemories();
-          snapToBottom();
-          setCompleted([
-            { id: makeId("sys"), role: "system", content: `Switched to: ${resumed.name ?? resumed.id}` },
-            ...resumed.turns.map((t) => ({
-              id: makeId(t.role),
-              role: t.role as MessageRole,
-              content: t.content,
-            })),
-          ]);
-        }}
-        onCancel={() => setShowPicker(false)}
-      />
-    );
-  }
-
-  //  main render 
+  //  render prep (must be before early returns — hooks can't come after conditional returns)
 
   const isWorking = busy || embeddingBusy;
   const sessionLabel = sessionRef.current
@@ -966,6 +923,51 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
 
   const hiddenAbove = Math.max(0, completed.length - scrollOffset - visibleMessages.length);
   const hiddenBelow = scrollOffset;
+
+  //  api key prompt overlay
+
+  if (showApiKeyPrompt) {
+    return (
+      <ApiKeyPrompt
+        currentKey={runtimeConfig.anthropicApiKey || process.env.ANTHROPIC_API_KEY}
+        onSave={handleApiKeySave}
+        onCancel={() => setShowApiKeyPrompt(false)}
+      />
+    );
+  }
+
+  //  session picker overlay
+
+  if (showPicker) {
+    return (
+      <SessionPicker
+        sessions={pickerSessions}
+        onSelect={(resumed) => {
+          setShowPicker(false);
+          sessionRef.current = resumed;
+          setAssistantBackend(resumed.backend);
+          setRuntimeConfig((c) => ({ ...c, backend: resumed.backend }));
+          histRef.current.clear();
+          for (const t of resumed.turns) histRef.current.add(t.role, t.content);
+          resumed.updatedAt = new Date().toISOString();
+          saveSession(resumed);
+          refreshMemories();
+          snapToBottom();
+          setCompleted([
+            { id: makeId("sys"), role: "system", content: `Switched to: ${resumed.name ?? resumed.id}` },
+            ...resumed.turns.map((t) => ({
+              id: makeId(t.role),
+              role: t.role as MessageRole,
+              content: t.content,
+            })),
+          ]);
+        }}
+        onCancel={() => setShowPicker(false)}
+      />
+    );
+  }
+
+  //  main render
 
   return (
     <Box flexDirection="column" height={termRows}>

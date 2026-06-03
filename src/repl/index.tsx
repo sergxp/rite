@@ -137,7 +137,8 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
   // All completed messages (no Static — we window them ourselves for alt screen)
   const [completed, setCompleted] = useState<Message[]>([]);
 
-  // Scroll: 0 = newest at bottom; positive = scrolled up N messages from end
+  // Scroll: 0 = bottom; positive = lines scrolled up from the bottom of the message list.
+  // Line-based (not message-based) for smooth scrolling.
   const [scrollOffset, setScrollOffset] = useState(0);
   const atBottomRef = useRef(true);
   useEffect(() => { atBottomRef.current = scrollOffset === 0; }, [scrollOffset]);
@@ -154,18 +155,16 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
   const { stdin } = useStdin();
   useEffect(() => {
     if (!stdin) return;
-    const SCROLL_STEP = 3;
+    const SCROLL_STEP = 2; // lines per wheel tick — small for smooth feel
     const handler = (direction: "up" | "down") => {
-      if (direction === "up") {
-        setScrollOffset((prev) => Math.min(Math.max(0, completed.length - 1), prev + SCROLL_STEP));
-      } else {
-        setScrollOffset((prev) => Math.max(0, prev - SCROLL_STEP));
-      }
+      setScrollOffset((prev) => {
+        if (direction === "up") return prev + SCROLL_STEP;
+        return Math.max(0, prev - SCROLL_STEP);
+      });
     };
     (stdin as NodeJS.EventEmitter).on("mouse_scroll", handler);
     return () => { (stdin as NodeJS.EventEmitter).off("mouse_scroll", handler); };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stdin, completed.length]);
+  }, [stdin]);
 
   const [streamContent, setStreamContent] = useState("");
   const [thinkingChars, setThinkingChars] = useState(0);
@@ -400,15 +399,6 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
     // Ctrl+Shift+V — clear pending images
     if (key.ctrl && key.shift && typed === "V") {
       setPendingImages([]);
-      return;
-    }
-
-    if (key.pageUp) {
-      setScrollOffset((prev) => Math.min(Math.max(0, completed.length - 1), prev + Math.max(1, Math.floor(termRows / 4))));
-      return;
-    }
-    if (key.pageDown) {
-      setScrollOffset((prev) => Math.max(0, prev - Math.max(1, Math.floor(termRows / 4))));
       return;
     }
 
@@ -952,9 +942,21 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
   const showLogo = scrollOffset === 0 && totalMessageLines < msgAreaHeight;
   const effectiveMsgAreaHeight = showLogo ? Math.max(3, msgAreaHeight - LOGO_HEIGHT) : msgAreaHeight;
 
-  // Calculate which messages to show — work backwards from `endIdx` until we fill effectiveMsgAreaHeight
-  const visibleMessages = useMemo(() => {
-    const endIdx = Math.max(0, completed.length - scrollOffset);
+  // Line-based scroll: find the end boundary by counting scrollOffset lines up from the bottom,
+  // then fill backwards from there to fit effectiveMsgAreaHeight lines.
+  const { visibleMessages, hiddenAbove, hiddenBelow } = useMemo(() => {
+    // Step 1: walk backwards from the last message, skipping scrollOffset lines
+    let linesToSkip = scrollOffset;
+    let endIdx = completed.length;
+    for (let i = completed.length - 1; i >= 0 && linesToSkip > 0; i--) {
+      const msgLines = estimateMessageLines(completed[i], termCols);
+      linesToSkip -= msgLines;
+      if (linesToSkip >= 0) endIdx = i; // fully skipped this message
+    }
+    // Clamp: can't scroll past the top
+    endIdx = Math.max(0, endIdx);
+
+    // Step 2: fill visible area backwards from endIdx
     let usedLines = 0;
     const result: Message[] = [];
     for (let i = endIdx - 1; i >= 0; i--) {
@@ -963,11 +965,14 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
       usedLines += lines;
       result.unshift(completed[i]);
     }
-    return result;
-  }, [completed, scrollOffset, effectiveMsgAreaHeight, termCols]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const hiddenAbove = Math.max(0, completed.length - scrollOffset - visibleMessages.length);
-  const hiddenBelow = scrollOffset;
+    const firstVisibleIdx = result.length > 0 ? completed.indexOf(result[0]) : endIdx;
+    return {
+      visibleMessages: result,
+      hiddenAbove: firstVisibleIdx,
+      hiddenBelow: completed.length - endIdx,
+    };
+  }, [completed, scrollOffset, effectiveMsgAreaHeight, termCols]); // eslint-disable-line react-hooks/exhaustive-deps
 
   //  api key prompt overlay
 
@@ -1022,7 +1027,7 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
           <Text dimColor>
             {hiddenAbove > 0 ? `↑ ${hiddenAbove} message${hiddenAbove !== 1 ? "s" : ""} above` : "↑ top"}
             {hiddenBelow > 0 ? `  ↓ ${hiddenBelow} below` : ""}
-            {"  pgup/pgdn to scroll"}
+            {"  scroll to navigate"}
           </Text>
         </Box>
       )}

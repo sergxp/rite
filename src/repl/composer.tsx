@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { Box, Text } from "ink";
-import TextInput from "ink-text-input";
+import TextInput from "./text-input.js";
 
 const SPINNER = ["|", "/", "-", "\\", "|", "/", "-", "\\", "|", "/"];
 
@@ -126,7 +126,7 @@ export function Composer({
         <Text dimColor>
           {busy
             ? value.trim()
-              ? "enter/esc queue  ctrl+c exit"
+              ? "enter queue  esc cancel  ctrl+c exit"
               : "esc cancel  ctrl+c exit"
             : "enter send  up/down history  ctrl+c exit  /help /clear /memory /backend /resume"}
         </Text>

@@ -325,22 +325,16 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
       return;
     }
 
-    // Escape: clear paste first; if busy and input has text, queue it (type-ahead);
-    // if busy and no text, cancel in-progress request; if idle, no-op.
+    // Escape: clear paste first; if busy, always cancel in-progress request
+    // (and clear any typed-ahead text). Type-ahead queuing uses Enter while busy.
     if (key.escape) {
       if (pastedContentRef.current) {
         setPastedContent(null);
         return;
       }
       if (busyRef.current) {
-        const current = inputRef.current.trim();
-        if (current) {
-          messageQueueRef.current.push(current);
-          setQueuedCount(messageQueueRef.current.length);
-          setInput("");
-        } else {
-          abortControllerRef.current?.abort();
-        }
+        setInput("");
+        abortControllerRef.current?.abort();
         return;
       }
       return;

@@ -1,5 +1,5 @@
-import React, { useState, useRef, useCallback, useEffect } from "react";
-import { render, Box, Text, Static, useApp, useInput } from "ink";
+import React, { useState, useRef, useCallback, useEffect, useMemo } from "react";
+import { render, Box, Text, useApp, useInput } from "ink";
 import { ConversationHistory } from "./history.js";
 import { buildEnrichedPrompt } from "./enricher.js";
 import { loadMemories } from "../memory/reader.js";
@@ -28,6 +28,7 @@ import { updateConfig } from "../config/store.js";
 import { setRiteApiKey } from "../backends/claude.js";
 import { ApiKeyPrompt } from "./apikey-prompt.js";
 import { setPasteHandler, installBracketedPaste, uninstallBracketedPaste } from "./paste.js";
+import { Logo, LOGO_HEIGHT } from "./logo.js";
 import type { BackendName, RiteConfig } from "../config/types.js";
 import type { MemoryFile } from "../memory/types.js";
 import type { Session } from "../sessions/types.js";
@@ -61,7 +62,27 @@ function parseBackendSwitchArg(
   return null;
 }
 
-//  component 
+// Estimate terminal lines a rendered message will occupy. Used for viewport math.
+// Intentionally generous (+2 buffer) to prevent over-filling the message box.
+function estimateMessageLines(msg: Message, colWidth: number): number {
+  const textWidth = Math.max(20, colWidth - 8);
+  if (msg.role === "tool_call") {
+    let h = 3; // icon + name row + margin
+    if (msg.toolResult) {
+      const resultLines = msg.toolResult.split("\n").filter((l) => l.trim());
+      h += Math.min(4, resultLines.length) + (resultLines.length > 4 ? 1 : 0) + 1;
+    }
+    return h;
+  }
+  if (msg.role === "thinking") return 8; // header + bordered block preview + margin
+  let h = 2; // role label + marginBottom
+  for (const line of msg.content.split("\n")) {
+    h += Math.max(1, Math.ceil((line.length || 1) / textWidth));
+  }
+  return h + 2; // +2 buffer for markdown/padding variance
+}
+
+//  component
 
 interface ReplProps {
   backend: BackendName;
@@ -73,8 +94,33 @@ interface ReplProps {
 function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
   const { exit } = useApp();
 
-  // All completed messages — rendered via <Static> (printed once, scroll natively).
+  // Terminal dimensions — updated on resize via process.stdout
+  const [termRows, setTermRows] = useState(() => process.stdout.rows || 24);
+  const [termCols, setTermCols] = useState(() => process.stdout.columns || 80);
+  useEffect(() => {
+    const handler = () => {
+      setTermRows(process.stdout.rows || 24);
+      setTermCols(process.stdout.columns || 80);
+    };
+    process.stdout.on("resize", handler);
+    return () => { process.stdout.off("resize", handler); };
+  }, []);
+
+  // All completed messages (no Static — we window them ourselves for alt screen)
   const [completed, setCompleted] = useState<Message[]>([]);
+
+  // Scroll: 0 = newest at bottom; positive = scrolled up N messages from end
+  const [scrollOffset, setScrollOffset] = useState(0);
+  const atBottomRef = useRef(true);
+  useEffect(() => { atBottomRef.current = scrollOffset === 0; }, [scrollOffset]);
+  // Stay at bottom when new messages arrive (if we were already at bottom)
+  const prevCompletedLenRef = useRef(0);
+  useEffect(() => {
+    if (completed.length !== prevCompletedLenRef.current) {
+      prevCompletedLenRef.current = completed.length;
+      if (atBottomRef.current) setScrollOffset(0);
+    }
+  }, [completed.length]);
 
   const [streamContent, setStreamContent] = useState("");
   const [thinkingChars, setThinkingChars] = useState(0);
@@ -315,6 +361,15 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
     // Ctrl+Shift+V — clear pending images
     if (key.ctrl && key.shift && typed === "V") {
       setPendingImages([]);
+      return;
+    }
+
+    if (key.pageUp) {
+      setScrollOffset((prev) => Math.min(Math.max(0, completed.length - 1), prev + Math.max(1, Math.floor(termRows / 4))));
+      return;
+    }
+    if (key.pageDown) {
+      setScrollOffset((prev) => Math.max(0, prev - Math.max(1, Math.floor(termRows / 4))));
       return;
     }
 
@@ -869,12 +924,75 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
 
   const hasLiveArea = isWorking;
 
+  // Composer height: status bar (1) + border+input box (3) + hints (1) + optionals + margin
+  const composerHeight = 5
+    + (pastedContent ? 1 : 0)
+    + (pendingImages.length > 0 ? 1 : 0)
+    + (queuedCount > 0 ? 1 : 0)
+    + 1; // safety margin
+
+  // Live area height when busy
+  const liveAreaHeight = hasLiveArea ? (() => {
+    let h = 2; // "rite" header + marginBottom
+    if (thinkingPreview && !streamPreview) h += Math.min(LIVE_PREVIEW_LINES, thinkingPreview.split("\n").length);
+    if (thinkingSummary) h += 1;
+    if (activeTool) h += 1;
+    if (streamPreview) h += streamPreview.split("\n").length;
+    if (!streamPreview && !thinkingPreview && !activeTool) h += 1; // fallback spinner
+    return h + 2; // safety margin
+  })() : 0;
+
+  const scrollIndicatorHeight = scrollOffset > 0 ? 1 : 0;
+  const msgAreaHeight = Math.max(3, termRows - composerHeight - liveAreaHeight - scrollIndicatorHeight);
+
+  // Total estimated lines for all completed messages — used to decide when to hide the logo
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const totalMessageLines = useMemo(
+    () => completed.reduce((sum, msg) => sum + estimateMessageLines(msg, termCols), 0),
+    [completed, termCols] // eslint-disable-line react-hooks/exhaustive-deps
+  );
+
+  // Logo is shown at startup and flushed once messages fill the viewport height
+  const showLogo = scrollOffset === 0 && totalMessageLines < msgAreaHeight;
+  const effectiveMsgAreaHeight = showLogo ? Math.max(3, msgAreaHeight - LOGO_HEIGHT) : msgAreaHeight;
+
+  // Calculate which messages to show — work backwards from `endIdx` until we fill effectiveMsgAreaHeight
+  const visibleMessages = useMemo(() => {
+    const endIdx = Math.max(0, completed.length - scrollOffset);
+    let usedLines = 0;
+    const result: Message[] = [];
+    for (let i = endIdx - 1; i >= 0; i--) {
+      const lines = estimateMessageLines(completed[i], termCols);
+      if (usedLines + lines > effectiveMsgAreaHeight && result.length > 0) break;
+      usedLines += lines;
+      result.unshift(completed[i]);
+    }
+    return result;
+  }, [completed, scrollOffset, effectiveMsgAreaHeight, termCols]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const hiddenAbove = Math.max(0, completed.length - scrollOffset - visibleMessages.length);
+  const hiddenBelow = scrollOffset;
+
   return (
-    <Box flexDirection="column">
-      {/*  Completed messages — Static renders each once and they scroll up naturally */}
-      <Static items={completed}>
-        {(msg) => <MessageBubble key={msg.id} message={msg} />}
-      </Static>
+    <Box flexDirection="column" height={termRows}>
+      {/* Scroll indicator — shown when there are messages above the viewport */}
+      {scrollIndicatorHeight > 0 && (
+        <Box paddingX={1}>
+          <Text dimColor>
+            {hiddenAbove > 0 ? `↑ ${hiddenAbove} message${hiddenAbove !== 1 ? "s" : ""} above` : "↑ top"}
+            {hiddenBelow > 0 ? `  ↓ ${hiddenBelow} below` : ""}
+            {"  pgup/pgdn to scroll"}
+          </Text>
+        </Box>
+      )}
+
+      {/* Message area — overflow:hidden clips anything that doesn't fit */}
+      <Box flexDirection="column" flexGrow={1} overflow="hidden">
+        {showLogo && <Logo />}
+        {visibleMessages.map((msg) => (
+          <MessageBubble key={msg.id} message={msg} />
+        ))}
+      </Box>
 
       {/*  Live area — re-renders in place while assistant is working  */}
       {hasLiveArea && (
@@ -909,7 +1027,6 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
               <Text wrap="wrap">{streamPreview}</Text>
             </Box>
           )}
-          {/* Fallback: show a spinner when busy but nothing else to display yet */}
           {!streamPreview && !thinkingPreview && !activeTool && (
             <Box paddingLeft={3}>
               <Text dimColor>{SPINNER[spinnerFrame]}</Text>
@@ -918,7 +1035,7 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
         </Box>
       )}
 
-      {/*  Composer — always at bottom  */}
+      {/*  Composer — pinned to bottom  */}
       <Composer
         value={input}
         onChange={(v) => { setInput(v); setHistoryIdx(null); }}
@@ -947,6 +1064,8 @@ export async function startRepl(
   resumeSessionId?: string
 ): Promise<void> {
   installBracketedPaste(); // must run before render() so stdin is patched before Ink reads it
+  process.stdout.write("\x1b[?1049h"); // enter alt screen
+  process.stdout.write("\x1b[2J\x1b[H"); // clear alt screen, cursor to top-left
   try {
     const { waitUntilExit } = render(
       <Repl
@@ -960,6 +1079,7 @@ export async function startRepl(
   } finally {
     uninstallBracketedPaste();
     process.stdout.write("\x1b[?25h"); // restore cursor
+    process.stdout.write("\x1b[?1049l"); // exit alt screen (restores previous terminal content)
   }
 }
 

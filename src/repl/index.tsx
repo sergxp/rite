@@ -1,5 +1,6 @@
-import React, { useState, useRef, useCallback, useEffect, useMemo } from "react";
+import React, { useState, useRef, useCallback, useEffect } from "react";
 import { render, Box, Text, useApp, useInput, useStdin } from "ink";
+import { ScrollView, type ScrollViewRef } from "ink-scroll-view";
 import { ConversationHistory } from "./history.js";
 import { buildEnrichedPrompt } from "./enricher.js";
 import { loadMemories } from "../memory/reader.js";
@@ -90,26 +91,6 @@ function parseBackendSwitchArg(
   return null;
 }
 
-// Estimate terminal lines a rendered message will occupy. Used for viewport math.
-// Intentionally generous (+2 buffer) to prevent over-filling the message box.
-function estimateMessageLines(msg: Message, colWidth: number): number {
-  const textWidth = Math.max(20, colWidth - 8);
-  if (msg.role === "tool_call") {
-    let h = 3; // icon + name row + margin
-    if (msg.toolResult) {
-      const resultLines = msg.toolResult.split("\n").filter((l) => l.trim());
-      h += Math.min(4, resultLines.length) + (resultLines.length > 4 ? 1 : 0) + 1;
-    }
-    return h;
-  }
-  if (msg.role === "thinking") return 8; // header + bordered block preview + margin
-  let h = 2; // role label + marginBottom
-  for (const line of msg.content.split("\n")) {
-    h += Math.max(1, Math.ceil((line.length || 1) / textWidth));
-  }
-  return h + 2; // +2 buffer for markdown/padding variance
-}
-
 //  component
 
 interface ReplProps {
@@ -124,11 +105,10 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
 
   // Terminal dimensions — updated on resize via process.stdout
   const [termRows, setTermRows] = useState(() => process.stdout.rows || 24);
-  const [termCols, setTermCols] = useState(() => process.stdout.columns || 80);
   useEffect(() => {
     const handler = () => {
       setTermRows(process.stdout.rows || 24);
-      setTermCols(process.stdout.columns || 80);
+      scrollRef.current?.remeasure();
     };
     process.stdout.on("resize", handler);
     return () => { process.stdout.off("resize", handler); };
@@ -137,30 +117,18 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
   // All completed messages (no Static — we window them ourselves for alt screen)
   const [completed, setCompleted] = useState<Message[]>([]);
 
-  // Scroll: 0 = bottom; positive = lines scrolled up from the bottom of the message list.
-  // Line-based (not message-based) for smooth scrolling.
-  const [scrollOffset, setScrollOffset] = useState(0);
+  // ScrollView ref — all scroll control goes through ink-scroll-view (true line-level smooth scroll)
+  const scrollRef = useRef<ScrollViewRef>(null);
   const atBottomRef = useRef(true);
-  useEffect(() => { atBottomRef.current = scrollOffset === 0; }, [scrollOffset]);
-  // Stay at bottom when new messages arrive (if we were already at bottom)
-  const prevCompletedLenRef = useRef(0);
-  useEffect(() => {
-    if (completed.length !== prevCompletedLenRef.current) {
-      prevCompletedLenRef.current = completed.length;
-      if (atBottomRef.current) setScrollOffset(0);
-    }
-  }, [completed.length]);
 
   // Mouse wheel scroll — events emitted by installStdinMouseFilter() in startRepl
   const { stdin } = useStdin();
   useEffect(() => {
     if (!stdin) return;
-    const SCROLL_STEP = 2; // lines per wheel tick — small for smooth feel
+    const SCROLL_STEP = 2; // lines per wheel tick for smooth feel
     const handler = (direction: "up" | "down") => {
-      setScrollOffset((prev) => {
-        if (direction === "up") return prev + SCROLL_STEP;
-        return Math.max(0, prev - SCROLL_STEP);
-      });
+      if (direction === "up") scrollRef.current?.scrollBy(-SCROLL_STEP);
+      else scrollRef.current?.scrollBy(SCROLL_STEP);
     };
     (stdin as NodeJS.EventEmitter).on("mouse_scroll", handler);
     return () => { (stdin as NodeJS.EventEmitter).off("mouse_scroll", handler); };
@@ -251,8 +219,11 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
     return () => clearInterval(t);
   }, [busy, embeddingBusy]);
 
-  // With Static+native scroll, content appends at bottom automatically.
-  const snapToBottom = useCallback(() => {}, []);
+  // Scroll to bottom imperatively (used after session load, sending message, etc.)
+  const snapToBottom = useCallback(() => {
+    atBottomRef.current = true;
+    scrollRef.current?.scrollToBottom();
+  }, []);
 
   // Type-ahead queue drain: when busy transitions to false, auto-submit the next queued message.
   useEffect(() => {
@@ -928,51 +899,25 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
     return h + 2; // safety margin
   })() : 0;
 
-  const scrollIndicatorHeight = scrollOffset > 0 ? 1 : 0;
-  const msgAreaHeight = Math.max(3, termRows - composerHeight - liveAreaHeight - scrollIndicatorHeight);
+  // Always reserve 1 line for scroll indicator to prevent layout jump when it shows/hides
+  const SCROLL_INDICATOR_HEIGHT = 1;
+  const msgAreaHeight = Math.max(3, termRows - composerHeight - liveAreaHeight - SCROLL_INDICATOR_HEIGHT);
 
-  // Total estimated lines for all completed messages — used to decide when to hide the logo
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  const totalMessageLines = useMemo(
-    () => completed.reduce((sum, msg) => sum + estimateMessageLines(msg, termCols), 0),
-    [completed, termCols] // eslint-disable-line react-hooks/exhaustive-deps
-  );
+  // Logo shown at startup until the first message arrives
+  const showLogo = completed.length === 0 && !isWorking;
 
-  // Logo is shown at startup and flushed once messages fill the viewport height
-  const showLogo = scrollOffset === 0 && totalMessageLines < msgAreaHeight;
-  const effectiveMsgAreaHeight = showLogo ? Math.max(3, msgAreaHeight - LOGO_HEIGHT) : msgAreaHeight;
+  // Track scroll position for scroll indicator via onScroll callback
+  const [scrolledUp, setScrolledUp] = useState(false);
+  const handleScroll = useCallback((offset: number) => {
+    const bottom = scrollRef.current?.getBottomOffset() ?? 0;
+    atBottomRef.current = offset >= bottom;
+    setScrolledUp(offset > 0);
+  }, []);
 
-  // Line-based scroll: find the end boundary by counting scrollOffset lines up from the bottom,
-  // then fill backwards from there to fit effectiveMsgAreaHeight lines.
-  const { visibleMessages, hiddenAbove, hiddenBelow } = useMemo(() => {
-    // Step 1: walk backwards from the last message, skipping scrollOffset lines
-    let linesToSkip = scrollOffset;
-    let endIdx = completed.length;
-    for (let i = completed.length - 1; i >= 0 && linesToSkip > 0; i--) {
-      const msgLines = estimateMessageLines(completed[i], termCols);
-      linesToSkip -= msgLines;
-      if (linesToSkip >= 0) endIdx = i; // fully skipped this message
-    }
-    // Clamp: can't scroll past the top
-    endIdx = Math.max(0, endIdx);
-
-    // Step 2: fill visible area backwards from endIdx
-    let usedLines = 0;
-    const result: Message[] = [];
-    for (let i = endIdx - 1; i >= 0; i--) {
-      const lines = estimateMessageLines(completed[i], termCols);
-      if (usedLines + lines > effectiveMsgAreaHeight && result.length > 0) break;
-      usedLines += lines;
-      result.unshift(completed[i]);
-    }
-
-    const firstVisibleIdx = result.length > 0 ? completed.indexOf(result[0]) : endIdx;
-    return {
-      visibleMessages: result,
-      hiddenAbove: firstVisibleIdx,
-      hiddenBelow: completed.length - endIdx,
-    };
-  }, [completed, scrollOffset, effectiveMsgAreaHeight, termCols]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Auto-scroll to bottom when new content is added, if user was already at bottom
+  const handleContentHeightChange = useCallback((_height: number) => {
+    if (atBottomRef.current) scrollRef.current?.scrollToBottom();
+  }, []);
 
   //  api key prompt overlay
 
@@ -1021,24 +966,26 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
 
   return (
     <Box flexDirection="column" height={termRows}>
-      {/* Scroll indicator — shown when there are messages above the viewport */}
-      {scrollIndicatorHeight > 0 && (
-        <Box paddingX={1}>
-          <Text dimColor>
-            {hiddenAbove > 0 ? `↑ ${hiddenAbove} message${hiddenAbove !== 1 ? "s" : ""} above` : "↑ top"}
-            {hiddenBelow > 0 ? `  ↓ ${hiddenBelow} below` : ""}
-            {"  scroll to navigate"}
-          </Text>
-        </Box>
-      )}
+      {/* Scroll indicator — 1 line reserved always to prevent layout jump */}
+      <Box paddingX={1} height={SCROLL_INDICATOR_HEIGHT}>
+        {scrolledUp && (
+          <Text dimColor>↑ scrolled — mouse wheel to navigate</Text>
+        )}
+      </Box>
 
-      {/* Message area — overflow:hidden clips anything that doesn't fit */}
-      <Box flexDirection="column" flexGrow={1} overflow="hidden">
+      {/* Message area — ink-scroll-view handles true smooth line-level scrolling */}
+      <ScrollView
+        ref={scrollRef}
+        height={showLogo ? Math.max(3, msgAreaHeight - LOGO_HEIGHT) : msgAreaHeight}
+        flexDirection="column"
+        onScroll={handleScroll}
+        onContentHeightChange={handleContentHeightChange}
+      >
         {showLogo && <Logo />}
-        {visibleMessages.map((msg) => (
+        {completed.map((msg) => (
           <MessageBubble key={msg.id} message={msg} />
         ))}
-      </Box>
+      </ScrollView>
 
       {/*  Live area — re-renders in place while assistant is working  */}
       {hasLiveArea && (

@@ -8,6 +8,7 @@ export interface ComposerProps {
   value: string;
   onChange: (val: string) => void;
   onSubmit: (val: string) => void;
+  onTab?: () => void;
   busy?: boolean;
   backend?: string;
   utilityBackend?: string;
@@ -18,12 +19,14 @@ export interface ComposerProps {
   pastedContent?: string | null;
   onClearPaste?: () => void;
   queuedCount?: number;
+  autocompleteSuggestions?: string[];
 }
 
-export function Composer({
+export const Composer = React.memo(function Composer({
   value,
   onChange,
   onSubmit,
+  onTab,
   busy = false,
   backend = "claude",
   utilityBackend,
@@ -34,6 +37,7 @@ export function Composer({
   pastedContent,
   onClearPaste: _onClearPaste,
   queuedCount = 0,
+  autocompleteSuggestions = [],
 }: ComposerProps) {
   const [frame, setFrame] = useState(0);
 
@@ -51,7 +55,7 @@ export function Composer({
       {/* Status bar */}
       <Box justifyContent="space-between" paddingX={1} marginBottom={0}>
         <Box>
-          <Text color="cyan" bold>
+          <Text color="cyanBright" bold>
             rite
           </Text>
           <Text dimColor> · </Text>
@@ -59,7 +63,7 @@ export function Composer({
           {utilityBackend && utilityBackend !== backend ? (
             <>
               <Text dimColor> / </Text>
-              <Text color="yellowBright" dimColor>
+              <Text color="yellowBright">
                 {utilityBackend}
               </Text>
             </>
@@ -91,10 +95,18 @@ export function Composer({
           value={value}
           onChange={onChange}
           onSubmit={onSubmit}
+          onTab={onTab}
           focus={true}
           placeholder={busy ? "Type next message..." : "Ask anything..."}
         />
       </Box>
+
+      {/* Autocomplete suggestions */}
+      {autocompleteSuggestions.length > 1 && (
+        <Box paddingX={2}>
+          <Text dimColor>{autocompleteSuggestions.join("  ")}</Text>
+        </Box>
+      )}
 
       {/* Paste badge */}
       {pastedContent && (
@@ -133,4 +145,4 @@ export function Composer({
       </Box>
     </Box>
   );
-}
+});

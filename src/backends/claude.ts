@@ -61,7 +61,7 @@ export async function callClaudeCliBlocking(
   prompt: string,
   options?: { systemPrompt?: string; model?: string; noHooks?: boolean }
 ): Promise<string> {
-  const args = ["--print", "--output-format", "text"];
+  const args = ["--print", "--output-format", "text", "--dangerously-skip-permissions"];
   if (options?.model) {
     args.push("--model", options.model);
   }
@@ -160,7 +160,7 @@ export async function* callClaude(
 
   const subprocess = execa(
     "claude",
-    ["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages"],
+    ["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--dangerously-skip-permissions"],
     { reject: false, stdin: "pipe", input: prompt, cancelSignal: signal }
   );
 

@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useMemo } from "react";
 import { Box, Text } from "ink";
 import { MarkdownMessage } from "./markdown.js";
 import type { ImageAttachment } from "../backends/events.js";
@@ -17,6 +17,8 @@ export interface Message {
   toolIsError?: boolean;
   durationMs?: number;
 }
+
+const STEP_SEP = "\n\n---\n\n";
 
 // Extract a concise description from tool input JSON (filename, command, pattern, etc.)
 function toolInputSummary(toolName: string, inputJson: string): string {
@@ -62,9 +64,9 @@ function ToolResultPreview({ result, isError }: { result: string; isError: boole
       {preview.map((line, i) => {
         if (hasDiff) {
           if (line.startsWith("+ "))
-            return <Text key={i} color="green" dimColor>{line}</Text>;
+            return <Text key={i} color="greenBright">{line}</Text>;
           if (line.startsWith("- "))
-            return <Text key={i} color="red" dimColor>{line}</Text>;
+            return <Text key={i} color="red">{line}</Text>;
         }
         return <Text key={i} dimColor>{line}</Text>;
       })}
@@ -76,10 +78,10 @@ function ToolResultPreview({ result, isError }: { result: string; isError: boole
 }
 
 function ThinkingBubble({ content }: { content: string }) {
-  const lines = content
-    .split("\n")
-    .map((l) => l.trim())
-    .filter(Boolean);
+  const lines = useMemo(
+    () => content.split("\n").map((l) => l.trim()).filter(Boolean),
+    [content]
+  );
 
   const subject = lines[0] ?? "";
   const body = lines.slice(1);
@@ -103,13 +105,13 @@ function ThinkingBubble({ content }: { content: string }) {
         flexDirection="column"
       >
         {subject ? (
-          <Text italic bold color="gray">{subject}</Text>
+          <Text italic bold dimColor>{subject}</Text>
         ) : null}
         {body.slice(0, 4).map((line, i) => (
-          <Text key={i} italic dimColor color="gray">{line}</Text>
+          <Text key={i} italic dimColor>{line}</Text>
         ))}
         {body.length > 4 && (
-          <Text dimColor italic color="gray">…{body.length - 4} more lines</Text>
+          <Text italic dimColor>…{body.length - 4} more lines</Text>
         )}
       </Box>
     </Box>
@@ -132,17 +134,17 @@ function ToolCallBubble({
   const detail = toolInputJson ? toolInputSummary(toolName, toolInputJson) : "";
   const isPending = toolResult === undefined;
   const duration = durationMs !== undefined ? ` (${durationMs}ms)` : "";
-  const statusColor = isPending ? "gray" : toolIsError ? "red" : "cyan";
+  const statusColor = isPending ? undefined : toolIsError ? "red" : "cyanBright";
   const statusIcon = isPending ? "…" : toolIsError ? "✗" : "✓";
 
   return (
     <Box flexDirection="column" marginBottom={1}>
       <Box paddingLeft={2}>
         <Text dimColor>⚙ </Text>
-        <Text color="cyanBright" bold dimColor>{toolName}</Text>
+        <Text color="cyanBright" bold>{toolName}</Text>
         {detail ? <Text dimColor>  {detail}</Text> : null}
         <Text dimColor>  </Text>
-        <Text color={statusColor} dimColor>{statusIcon}{duration}</Text>
+        <Text dimColor={isPending} color={statusColor}>{statusIcon}{duration}</Text>
       </Box>
       {toolResult !== undefined && (
         <ToolResultPreview result={toolResult} isError={toolIsError ?? false} />
@@ -151,7 +153,7 @@ function ToolCallBubble({
   );
 }
 
-export function MessageBubble({ message }: { message: Message }) {
+export const MessageBubble = React.memo(function MessageBubble({ message }: { message: Message }) {
   if (message.role === "thinking") {
     return <ThinkingBubble content={message.content} />;
   }
@@ -169,7 +171,7 @@ export function MessageBubble({ message }: { message: Message }) {
   if (message.role === "system") {
     return (
       <Box marginBottom={1} paddingLeft={1}>
-        <Text color="yellowBright" dimColor> {message.content}</Text>
+        <Text color="yellowBright"> {message.content}</Text>
       </Box>
     );
   }
@@ -183,7 +185,7 @@ export function MessageBubble({ message }: { message: Message }) {
         {message.images && message.images.length > 0 && (
           <Box paddingLeft={3}>
             {message.images.map((img, i) => (
-              <Text key={i} color="blueBright" dimColor>📎 {img.label}  </Text>
+              <Text key={i} color="blueBright">📎 {img.label}  </Text>
             ))}
           </Box>
         )}
@@ -195,8 +197,10 @@ export function MessageBubble({ message }: { message: Message }) {
   }
 
   // assistant
-  const STEP_SEP = "\n\n---\n\n";
-  const responseParts = message.content.split(STEP_SEP);
+  const responseParts = useMemo(
+    () => message.content.split(STEP_SEP),
+    [message.content]
+  );
   const interimSteps = responseParts.slice(0, -1);
   const finalResponse = responseParts[responseParts.length - 1];
 
@@ -207,7 +211,7 @@ export function MessageBubble({ message }: { message: Message }) {
       </Box>
       {interimSteps.map((step, i) => (
         <Box key={i} paddingLeft={3} marginBottom={1}>
-          <Text wrap="wrap" color="gray" dimColor>{step.trim()}</Text>
+          <Text wrap="wrap" dimColor>{step.trim()}</Text>
         </Box>
       ))}
       <Box paddingLeft={3}>
@@ -215,4 +219,4 @@ export function MessageBubble({ message }: { message: Message }) {
       </Box>
     </Box>
   );
-}
+});

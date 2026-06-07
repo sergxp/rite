@@ -42,6 +42,12 @@ function makeId(prefix: string) {
 }
 
 const SPINNER = ["|", "/", "-", "\\", "|", "/", "-", "\\", "|", "/"];
+const RENDERED_MSG_CAP = 150;
+
+const SLASH_COMMANDS = [
+  "/help", "/clear", "/copy", "/memory", "/resume",
+  "/compact", "/apikey", "/exit", "/backend",
+];
 
 // SGR mouse scroll: filter raw mouse escape bytes from stdin so Ink never sees them,
 // and emit a custom 'mouse_scroll' event that the REPL component listens for.
@@ -100,6 +106,66 @@ interface ReplProps {
   resumeSessionId?: string;
 }
 
+// LiveArea is isolated so its 150ms spinner tick never touches Repl or the message list.
+interface LiveAreaProps {
+  activeTool: string | null;
+  streamPreview: string;
+  thinkingPreview: string;
+  thinkingSummary: string | null;
+  previewLines: number;
+}
+
+const LiveArea = React.memo(function LiveArea({
+  activeTool,
+  streamPreview,
+  thinkingPreview,
+  thinkingSummary,
+  previewLines,
+}: LiveAreaProps) {
+  const [spinnerFrame, setSpinnerFrame] = useState(0);
+
+  useEffect(() => {
+    const t = setInterval(() => setSpinnerFrame((f) => (f + 1) % SPINNER.length), 150);
+    return () => clearInterval(t);
+  }, []);
+
+  return (
+    <Box flexDirection="column" marginBottom={1}>
+      <Box paddingLeft={1}>
+        <Text color="greenBright" bold>rite</Text>
+      </Box>
+      {thinkingPreview && !streamPreview && (
+        <Box paddingLeft={3}>
+          <Text wrap="wrap" dimColor>{(() => {
+            const lines = thinkingPreview.split("\n");
+            return lines.length <= previewLines ? thinkingPreview : lines.slice(-previewLines).join("\n");
+          })()}</Text>
+        </Box>
+      )}
+      {thinkingSummary && (
+        <Box paddingLeft={3}>
+          <Text dimColor>{thinkingSummary}</Text>
+        </Box>
+      )}
+      {activeTool && (
+        <Box paddingLeft={3}>
+          <Text dimColor>{SPINNER[spinnerFrame]} {activeTool}</Text>
+        </Box>
+      )}
+      {streamPreview && (
+        <Box paddingLeft={3}>
+          <Text wrap="wrap">{streamPreview}</Text>
+        </Box>
+      )}
+      {!streamPreview && !thinkingPreview && !activeTool && (
+        <Box paddingLeft={3}>
+          <Text dimColor>{SPINNER[spinnerFrame]}</Text>
+        </Box>
+      )}
+    </Box>
+  );
+});
+
 function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
   const { exit } = useApp();
 
@@ -148,7 +214,6 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
   const [thinkingPreview, setThinkingPreview] = useState("");
   const [busy, setBusy] = useState(false);
   const [embeddingBusy, setEmbeddingBusy] = useState(false);
-  const [spinnerFrame, setSpinnerFrame] = useState(0);
   const [activeTool, setActiveTool] = useState<string | null>(null);
 
   // Input
@@ -156,6 +221,21 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
   const [inputHistory, setInputHistory] = useState<string[]>([]);
   const [historyIdx, setHistoryIdx] = useState<number | null>(null);
   const [draft, setDraft] = useState("");
+
+  const autocompleteSuggestions =
+    input.startsWith("/") && input.length > 1
+      ? SLASH_COMMANDS.filter((cmd) => cmd.startsWith(input))
+      : [];
+
+  const handleTab = useCallback(() => {
+    if (!input.startsWith("/") || input.length <= 1) return;
+    const matches = SLASH_COMMANDS.filter((cmd) => cmd.startsWith(input));
+    if (matches.length === 1) {
+      const completion = matches[0].endsWith(" ") ? matches[0] : matches[0] + " ";
+      setInput(completion);
+      setHistoryIdx(null);
+    }
+  }, [input]);
   const [pendingImages, setPendingImages] = useState<ImageAttachment[]>([]);
 
   // App state
@@ -193,7 +273,6 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
 
   useEffect(() => {
     if (!busy && !embeddingBusy) {
-      setSpinnerFrame(0);
       liveRef.current = "";
       thinkingRef.current = { chars: 0, text: "" };
       setStreamContent("");
@@ -204,11 +283,9 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
     let lastContent = "";
     let lastThinkingChars = 0;
     let lastThinkingPreview = "";
+    // Poll refs for content changes — only setState when something actually changed
+    // so Repl doesn't re-render on silent ticks. Spinner ticks live in LiveArea.
     const t = setInterval(() => {
-      // Advance spinner every tick.
-      setSpinnerFrame((f) => (f + 1) % SPINNER.length);
-      // Only push content state updates when the value actually changed —
-      // avoids a re-render (and terminal cursor jump) on every tick.
       const content = liveRef.current;
       if (content !== lastContent) {
         lastContent = content;
@@ -444,7 +521,7 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
         return;
       }
 
-      setInputHistory((prev) => [...prev, trimmed]);
+      setInputHistory((prev) => (prev.length >= 100 ? [...prev.slice(-99), trimmed] : [...prev, trimmed]));
 
       //  slash commands 
 
@@ -588,6 +665,12 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
       }
 
       if (trimmed.startsWith("/")) {
+        // Enter on partial: if exactly one command matches, execute it
+        const partialMatches = SLASH_COMMANDS.filter((cmd) => cmd.startsWith(trimmed));
+        if (partialMatches.length === 1 && partialMatches[0] !== trimmed) {
+          await handleSubmit(partialMatches[0]);
+          return;
+        }
         addCompleted({
           id: makeId("sys"),
           role: "system",
@@ -864,6 +947,14 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
     ]
   );
 
+  // Stable ref-backed submit — Composer stays memoized even when handleSubmit is recreated
+  const handleSubmitRef = useRef(handleSubmit);
+  handleSubmitRef.current = handleSubmit;
+  const onSubmitStable = useCallback((v: string) => { void handleSubmitRef.current(v); }, []);
+
+  // Stable onChange for Composer — avoids recreating on every render
+  const onChangeStable = useCallback((v: string) => { setInput(v); setHistoryIdx(null); }, []);
+
   //  render prep (must be before early returns — hooks can't come after conditional returns)
 
   const isWorking = busy || embeddingBusy;
@@ -910,7 +1001,9 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
 
   // Always reserve 1 line for scroll indicator to prevent layout jump when it shows/hides
   const SCROLL_INDICATOR_HEIGHT = 1;
-  const msgAreaHeight = Math.max(3, termRows - composerHeight - liveAreaHeight - SCROLL_INDICATOR_HEIGHT);
+  // Use termRows-1 so outputHeight < stdout.rows — keeps Ink on the eraseLines
+  // path instead of clearTerminal (\x1b[2J), which blanks the screen and flickers.
+  const msgAreaHeight = Math.max(3, termRows - composerHeight - liveAreaHeight - SCROLL_INDICATOR_HEIGHT - 1);
 
   // Logo shown at startup until the first message arrives
   const showLogo = completed.length === 0 && !isWorking;
@@ -923,9 +1016,15 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
     setScrolledUp(offset > 0);
   }, []);
 
-  // Auto-scroll to bottom when new content is added, if user was already at bottom
+  // Auto-scroll to bottom when new content is added, if user was already at bottom.
+  // Debounced to 200ms — during streaming the live area height changes many times/second.
+  const scrollDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const handleContentHeightChange = useCallback((_height: number) => {
-    if (atBottomRef.current) scrollRef.current?.scrollToBottom();
+    if (!atBottomRef.current) return;
+    if (scrollDebounceRef.current) clearTimeout(scrollDebounceRef.current);
+    scrollDebounceRef.current = setTimeout(() => {
+      if (atBottomRef.current) scrollRef.current?.scrollToBottom();
+    }, 200);
   }, []);
 
   //  api key prompt overlay
@@ -974,7 +1073,7 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
   //  main render
 
   return (
-    <Box flexDirection="column" height={termRows}>
+    <Box flexDirection="column" height={termRows - 1}>
       {/* Scroll indicator — 1 line reserved always to prevent layout jump */}
       <Box paddingX={1} height={SCROLL_INDICATOR_HEIGHT}>
         {scrolledUp && (
@@ -991,57 +1090,28 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
         onContentHeightChange={handleContentHeightChange}
       >
         {showLogo && <Logo />}
-        {completed.map((msg) => (
+        {(completed.length > RENDERED_MSG_CAP ? completed.slice(-RENDERED_MSG_CAP) : completed).map((msg) => (
           <MessageBubble key={msg.id} message={msg} />
         ))}
       </ScrollView>
 
-      {/*  Live area — re-renders in place while assistant is working  */}
+      {/*  Live area — isolated component; spinner ticks don't re-render Repl  */}
       {hasLiveArea && (
-        <Box flexDirection="column" marginBottom={1}>
-          <Box paddingLeft={1}>
-            <Text color="greenBright" bold>rite</Text>
-          </Box>
-          {thinkingPreview && !streamPreview && (
-            <Box paddingLeft={3}>
-              <Text wrap="wrap" dimColor color="gray">{
-                (() => {
-                  const lines = thinkingPreview.split("\n");
-                  return lines.length <= LIVE_PREVIEW_LINES
-                    ? thinkingPreview
-                    : lines.slice(-LIVE_PREVIEW_LINES).join("\n");
-                })()
-              }</Text>
-            </Box>
-          )}
-          {thinkingSummary && (
-            <Box paddingLeft={3}>
-              <Text dimColor>{thinkingSummary}</Text>
-            </Box>
-          )}
-          {activeTool && (
-            <Box paddingLeft={3}>
-              <Text dimColor>{SPINNER[spinnerFrame]} {activeTool}</Text>
-            </Box>
-          )}
-          {streamPreview && (
-            <Box paddingLeft={3}>
-              <Text wrap="wrap">{streamPreview}</Text>
-            </Box>
-          )}
-          {!streamPreview && !thinkingPreview && !activeTool && (
-            <Box paddingLeft={3}>
-              <Text dimColor>{SPINNER[spinnerFrame]}</Text>
-            </Box>
-          )}
-        </Box>
+        <LiveArea
+          activeTool={activeTool}
+          streamPreview={streamPreview}
+          thinkingPreview={thinkingPreview}
+          thinkingSummary={thinkingSummary}
+          previewLines={LIVE_PREVIEW_LINES}
+        />
       )}
 
       {/*  Composer — pinned to bottom  */}
       <Composer
         value={input}
-        onChange={(v) => { setInput(v); setHistoryIdx(null); }}
-        onSubmit={(v) => void handleSubmit(v)}
+        onChange={onChangeStable}
+        onSubmit={onSubmitStable}
+        onTab={handleTab}
         busy={isWorking}
         backend={assistantBackend}
         utilityBackend={runtimeConfig.utilityBackend}
@@ -1052,6 +1122,7 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
         pastedContent={pastedContent}
         onClearPaste={() => setPastedContent(null)}
         queuedCount={queuedCount}
+        autocompleteSuggestions={autocompleteSuggestions}
       />
     </Box>
   );
@@ -1068,6 +1139,7 @@ export async function startRepl(
   installBracketedPaste(); // must run before render() so stdin is patched before Ink reads it
   const uninstallMouseFilter = installStdinMouseFilter(); // filter SGR mouse bytes before Ink reads them
   process.stdout.write("\x1b[?1049h"); // enter alt screen
+  process.stdout.write("\x1b[?25l"); // hide terminal cursor (TextInput renders its own block cursor)
   process.stdout.write("\x1b[?1000h\x1b[?1006h"); // enable SGR mouse (scroll wheel events)
   process.stdout.write("\x1b[2J\x1b[H"); // clear alt screen, cursor to top-left
   try {

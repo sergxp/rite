@@ -16,6 +16,7 @@ export interface TextInputProps {
   showCursor?: boolean;
   onChange: (value: string) => void;
   onSubmit?: (value: string) => void;
+  onTab?: () => void;
 }
 
 export default function TextInput({
@@ -27,6 +28,7 @@ export default function TextInput({
   showCursor = true,
   onChange,
   onSubmit,
+  onTab,
 }: TextInputProps) {
   const [state, setState] = useState({
     cursorOffset: (originalValue || "").length,
@@ -76,11 +78,15 @@ export default function TextInput({
 
   useInput(
     (input, key) => {
+      if (key.tab) {
+        onTab?.();
+        return;
+      }
+
       if (
         key.upArrow ||
         key.downArrow ||
         (key.ctrl && input === "c") ||
-        key.tab ||
         (key.shift && key.tab)
       ) {
         return;

@@ -256,11 +256,11 @@ function renderBlocks(tokens: BlockToken[] | undefined, keyPrefix: string): Reac
   return nodes;
 }
 
-export function MarkdownMessage({ content }: { content: string }) {
-  const tokens = marked.lexer(content, {
-    gfm: true,
-    breaks: true,
-  }) as BlockToken[];
+export const MarkdownMessage = React.memo(function MarkdownMessage({ content }: { content: string }) {
+  const tokens = React.useMemo(
+    () => marked.lexer(content, { gfm: true, breaks: true }) as BlockToken[],
+    [content]
+  );
 
   return <Box flexDirection="column">{renderBlocks(tokens, "root")}</Box>;
-}
+});

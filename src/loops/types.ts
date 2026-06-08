@@ -1,6 +1,6 @@
 import type { BackendName } from "../config/types.js";
 
-export type StepType = "llm" | "shell" | "human_input" | "condition";
+export type StepType = "llm" | "shell" | "human_input" | "condition" | "review";
 
 export interface BaseStep {
   id: string;
@@ -32,7 +32,17 @@ export interface ConditionStep extends BaseStep {
   if_false: string;
 }
 
-export type Step = LlmStep | ShellStep | HumanInputStep | ConditionStep;
+export interface ReviewStep extends BaseStep {
+  type: "review";
+  /** Template string describing what requirements to check. Supports {{steps.ID.output}} and {{context}}. */
+  criteria: string;
+  /** Step ID to jump back to when the review fails. */
+  implementation_step: string;
+  /** Maximum number of implement→review cycles before giving up. Defaults to 3. */
+  max_iterations?: number;
+}
+
+export type Step = LlmStep | ShellStep | HumanInputStep | ConditionStep | ReviewStep;
 
 export interface Loop {
   name: string;

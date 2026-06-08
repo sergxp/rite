@@ -1,4 +1,4 @@
-import React, { useMemo } from "react";
+import React, { useMemo, useState } from "react";
 import { Box, Text } from "ink";
 import { MarkdownMessage } from "./markdown.js";
 import type { ImageAttachment } from "../backends/events.js";
@@ -42,8 +42,18 @@ function toolInputSummary(toolName: string, inputJson: string): string {
   }
 }
 
-// Render a 3-line preview of tool output, colorizing diff lines like open-claudecode.
-function ToolResultPreview({ result, isError }: { result: string; isError: boolean }) {
+const TOOL_PREVIEW_LINES = 8;
+
+// Render a preview of tool output, colorizing diff lines. Expandable via `expanded` prop.
+function ToolResultPreview({
+  result,
+  isError,
+  expanded,
+}: {
+  result: string;
+  isError: boolean;
+  expanded: boolean;
+}) {
   if (isError) {
     const preview = result.slice(0, 200).replace(/\n/g, " ");
     return (
@@ -56,12 +66,12 @@ function ToolResultPreview({ result, isError }: { result: string; isError: boole
   const lines = result.split("\n").filter((l) => l.trim());
   const hasDiff =
     lines.some((l) => l.startsWith("- ")) && lines.some((l) => l.startsWith("+ "));
-  const preview = lines.slice(0, 4);
-  const overflow = lines.length > 4 ? lines.length - 4 : 0;
+  const visible = expanded ? lines : lines.slice(0, TOOL_PREVIEW_LINES);
+  const overflow = !expanded && lines.length > TOOL_PREVIEW_LINES ? lines.length - TOOL_PREVIEW_LINES : 0;
 
   return (
     <Box flexDirection="column" paddingLeft={4}>
-      {preview.map((line, i) => {
+      {visible.map((line, i) => {
         if (hasDiff) {
           if (line.startsWith("+ "))
             return <Text key={i} color="greenBright">{line}</Text>;
@@ -71,13 +81,15 @@ function ToolResultPreview({ result, isError }: { result: string; isError: boole
         return <Text key={i} dimColor>{line}</Text>;
       })}
       {overflow > 0 && (
-        <Text dimColor>… ({overflow} more lines)</Text>
+        <Text dimColor>… ({overflow} more lines — ctrl+o to expand)</Text>
       )}
     </Box>
   );
 }
 
-function ThinkingBubble({ content }: { content: string }) {
+const THINKING_PREVIEW_LINES = 4;
+
+function ThinkingBubble({ content, expanded }: { content: string; expanded: boolean }) {
   const lines = useMemo(
     () => content.split("\n").map((l) => l.trim()).filter(Boolean),
     [content]
@@ -86,12 +98,15 @@ function ThinkingBubble({ content }: { content: string }) {
   const subject = lines[0] ?? "";
   const body = lines.slice(1);
   const charCount = content.length;
+  const visibleBody = expanded ? body : body.slice(0, THINKING_PREVIEW_LINES);
+  const overflow = !expanded && body.length > THINKING_PREVIEW_LINES ? body.length - THINKING_PREVIEW_LINES : 0;
+  const marker = expanded ? "▼" : "▶";
 
   return (
     <Box flexDirection="column" marginBottom={1} paddingLeft={2}>
       <Box>
         <Text dimColor italic>💭 thought </Text>
-        <Text dimColor>({(charCount / 1000).toFixed(1)}k chars)</Text>
+        <Text dimColor>({(charCount / 1000).toFixed(1)}k chars) {marker}</Text>
       </Box>
       <Box
         marginLeft={1}
@@ -107,11 +122,11 @@ function ThinkingBubble({ content }: { content: string }) {
         {subject ? (
           <Text italic bold dimColor>{subject}</Text>
         ) : null}
-        {body.slice(0, 4).map((line, i) => (
+        {visibleBody.map((line, i) => (
           <Text key={i} italic dimColor>{line}</Text>
         ))}
-        {body.length > 4 && (
-          <Text italic dimColor>…{body.length - 4} more lines</Text>
+        {overflow > 0 && (
+          <Text italic dimColor>…{overflow} more lines — ctrl+t to expand</Text>
         )}
       </Box>
     </Box>
@@ -124,12 +139,14 @@ function ToolCallBubble({
   toolResult,
   toolIsError,
   durationMs,
+  toolsExpanded,
 }: {
   toolName: string;
   toolInputJson?: string;
   toolResult?: string;
   toolIsError?: boolean;
   durationMs?: number;
+  toolsExpanded: boolean;
 }) {
   const detail = toolInputJson ? toolInputSummary(toolName, toolInputJson) : "";
   const isPending = toolResult === undefined;
@@ -147,15 +164,23 @@ function ToolCallBubble({
         <Text dimColor={isPending} color={statusColor}>{statusIcon}{duration}</Text>
       </Box>
       {toolResult !== undefined && (
-        <ToolResultPreview result={toolResult} isError={toolIsError ?? false} />
+        <ToolResultPreview result={toolResult} isError={toolIsError ?? false} expanded={toolsExpanded} />
       )}
     </Box>
   );
 }
 
-export const MessageBubble = React.memo(function MessageBubble({ message }: { message: Message }) {
+export const MessageBubble = React.memo(function MessageBubble({
+  message,
+  thinkingExpanded,
+  toolsExpanded,
+}: {
+  message: Message;
+  thinkingExpanded: boolean;
+  toolsExpanded: boolean;
+}) {
   if (message.role === "thinking") {
-    return <ThinkingBubble content={message.content} />;
+    return <ThinkingBubble content={message.content} expanded={thinkingExpanded} />;
   }
 
   if (message.role === "tool_call") {
@@ -165,6 +190,7 @@ export const MessageBubble = React.memo(function MessageBubble({ message }: { me
       toolResult={message.toolResult}
       toolIsError={message.toolIsError}
       durationMs={message.durationMs}
+      toolsExpanded={toolsExpanded}
     />;
   }
 
@@ -201,22 +227,17 @@ export const MessageBubble = React.memo(function MessageBubble({ message }: { me
     () => message.content.split(STEP_SEP),
     [message.content]
   );
-  const interimSteps = responseParts.slice(0, -1);
-  const finalResponse = responseParts[responseParts.length - 1];
 
   return (
     <Box flexDirection="column" marginBottom={1}>
       <Box paddingLeft={1}>
-        <Text color="greenBright" bold>rite</Text>
+        <Text color="greenBright" bold>Rite</Text>
       </Box>
-      {interimSteps.map((step, i) => (
-        <Box key={i} paddingLeft={3} marginBottom={1}>
-          <Text wrap="wrap" dimColor>{step.trim()}</Text>
+      {responseParts.map((part, i) => (
+        <Box key={i} paddingLeft={3} marginBottom={i < responseParts.length - 1 ? 1 : 0}>
+          <MarkdownMessage content={part.trim()} />
         </Box>
       ))}
-      <Box paddingLeft={3}>
-        <MarkdownMessage content={finalResponse} />
-      </Box>
     </Box>
   );
 });

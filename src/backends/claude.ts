@@ -1,6 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { execa } from "execa";
-import { existsSync, mkdirSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import os from "os";
 import type { BackendEvent, ImageAttachment } from "./events.js";
@@ -26,7 +26,16 @@ export function setRiteApiKey(key: string): void {
 }
 
 function resolveApiKey(apiKey?: string): string {
-  return apiKey?.trim() || riteApiKey || "";
+  const inMemory = apiKey?.trim() || riteApiKey || process.env.ANTHROPIC_API_KEY?.trim();
+  if (inMemory) return inMemory;
+  // Last resort: read global config directly so a project-level config that
+  // blanks anthropicApiKey can't prevent vision calls from working.
+  try {
+    const raw = readFileSync(join(os.homedir(), ".rite", "config.json"), "utf-8");
+    return (JSON.parse(raw) as { anthropicApiKey?: string }).anthropicApiKey?.trim() || "";
+  } catch {
+    return "";
+  }
 }
 
 function getAnthropicClient(apiKey?: string): Anthropic | null {

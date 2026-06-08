@@ -56,7 +56,7 @@ export const Composer = React.memo(function Composer({
       <Box justifyContent="space-between" paddingX={1} marginBottom={0}>
         <Box>
           <Text color="cyanBright" bold>
-            rite
+            Rite
           </Text>
           <Text dimColor> · </Text>
           <Text color="greenBright">{backend}</Text>
@@ -102,7 +102,7 @@ export const Composer = React.memo(function Composer({
       </Box>
 
       {/* Autocomplete suggestions */}
-      {autocompleteSuggestions.length > 1 && (
+      {autocompleteSuggestions.length > 0 && (
         <Box paddingX={2}>
           <Text dimColor>{autocompleteSuggestions.join("  ")}</Text>
         </Box>
@@ -140,7 +140,7 @@ export const Composer = React.memo(function Composer({
             ? value.trim()
               ? "enter queue  esc cancel  ctrl+c exit"
               : "esc cancel  ctrl+c exit"
-            : "enter send  up/down history  ctrl+c exit  /help /clear /memory /backend /resume"}
+            : "enter send  tab autocomplete  up/down history  ctrl+c exit  /help /clear /memory /backend /resume"}
         </Text>
       </Box>
     </Box>

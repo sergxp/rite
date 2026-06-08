@@ -267,7 +267,7 @@ function blk(tokens: BT[], indent = INDENT): string {
 export function renderAssistantAnsi(content: string): string {
   const tokens = marked.lexer(content, { gfm: true, breaks: true }) as BT[];
   const body = blk(tokens);
-  return `\n ${GREEN_BRIGHT}${BOLD}rite${R}\n${body}\n`;
+  return `\n ${GREEN_BRIGHT}${BOLD}Rite${R}\n${body}\n`;
 }
 
 export function renderUserAnsi(content: string): string {

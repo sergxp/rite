@@ -1,5 +1,5 @@
 import React, { useState, useRef, useCallback, useEffect } from "react";
-import { render, Box, Text, useApp, useInput, useStdin } from "ink";
+import { render, Box, Text, useApp, useInput } from "ink";
 import { ScrollView, type ScrollViewRef } from "ink-scroll-view";
 import { ConversationHistory } from "./history.js";
 import { buildEnrichedPrompt } from "./enricher.js";
@@ -30,9 +30,13 @@ import { setRiteApiKey } from "../backends/claude.js";
 import { ApiKeyPrompt } from "./apikey-prompt.js";
 import { setPasteHandler, installBracketedPaste, uninstallBracketedPaste } from "./paste.js";
 import { Logo, LOGO_HEIGHT } from "./logo.js";
+import { LoopPicker } from "./loop-picker.js";
+import { loadLoops } from "../loops/registry.js";
+import { runLoopTui } from "../loops/runner.js";
 import type { BackendName, RiteConfig } from "../config/types.js";
 import type { MemoryFile } from "../memory/types.js";
 import type { Session } from "../sessions/types.js";
+import type { Loop } from "../loops/types.js";
 
 //  helpers 
 
@@ -46,36 +50,9 @@ const RENDERED_MSG_CAP = 150;
 
 const SLASH_COMMANDS = [
   "/help", "/clear", "/copy", "/memory", "/resume",
-  "/compact", "/apikey", "/exit", "/backend",
+  "/compact", "/apikey", "/exit", "/backend", "/loop", "/loop off",
 ];
 
-// SGR mouse scroll: filter raw mouse escape bytes from stdin so Ink never sees them,
-// and emit a custom 'mouse_scroll' event that the REPL component listens for.
-const SGR_MOUSE_RE = /\x1b\[<\d+;\d+;\d+[Mm]/g;
-
-function installStdinMouseFilter(): () => void {
-  const origPush = (process.stdin.push as (...a: unknown[]) => boolean).bind(process.stdin);
-  (process.stdin as unknown as Record<string, unknown>).push = function (
-    chunk: Buffer | string | null,
-    encoding?: BufferEncoding
-  ): boolean {
-    if (chunk !== null) {
-      const str = Buffer.isBuffer(chunk) ? chunk.toString("binary") : String(chunk);
-      for (const m of str.matchAll(/\x1b\[<(\d+);\d+;\d+M/g)) {
-        const code = parseInt(m[1], 10);
-        if (code === 64) process.stdin.emit("mouse_scroll", "up");
-        else if (code === 65) process.stdin.emit("mouse_scroll", "down");
-      }
-      const filtered = str.replace(SGR_MOUSE_RE, "");
-      if (!filtered) return true;
-      chunk = Buffer.isBuffer(chunk) ? Buffer.from(filtered, "binary") : filtered;
-    }
-    return origPush(chunk, encoding);
-  } as typeof process.stdin.push;
-  return () => {
-    (process.stdin as unknown as Record<string, unknown>).push = origPush;
-  };
-}
 
 function isValidBackend(s: string): s is BackendName {
   return s === "claude" || s === "codex" || s === "copilot";
@@ -132,7 +109,7 @@ const LiveArea = React.memo(function LiveArea({
   return (
     <Box flexDirection="column" marginBottom={1}>
       <Box paddingLeft={1}>
-        <Text color="greenBright" bold>rite</Text>
+        <Text color="greenBright" bold>Rite</Text>
       </Box>
       {thinkingPreview && !streamPreview && (
         <Box paddingLeft={3}>
@@ -171,9 +148,11 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
 
   // Terminal dimensions — updated on resize via process.stdout
   const [termRows, setTermRows] = useState(() => process.stdout.rows || 24);
+  const [termCols, setTermCols] = useState(() => process.stdout.columns || 80);
   useEffect(() => {
     const handler = () => {
       setTermRows(process.stdout.rows || 24);
+      setTermCols(process.stdout.columns || 80);
       scrollRef.current?.remeasure();
     };
     process.stdout.on("resize", handler);
@@ -186,33 +165,17 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
   // ScrollView ref — all scroll control goes through ink-scroll-view (true line-level smooth scroll)
   const scrollRef = useRef<ScrollViewRef>(null);
   const atBottomRef = useRef(true);
+  // Tracks current message area height so keyboard scroll handlers can use proportional steps
+  const msgAreaHeightRef = useRef(10);
 
-  // Mouse wheel scroll — events emitted by installStdinMouseFilter() in startRepl
-  const { stdin } = useStdin();
-  useEffect(() => {
-    if (!stdin) return;
-    const SCROLL_STEP = 2; // lines per wheel tick for smooth feel
-    const handler = (direction: "up" | "down") => {
-      const ref = scrollRef.current;
-      if (!ref) return;
-      if (direction === "up") {
-        // clamp at top (offset 0)
-        const next = Math.max(0, ref.getScrollOffset() - SCROLL_STEP);
-        ref.scrollTo(next);
-      } else {
-        // clamp at bottom
-        const next = Math.min(ref.getBottomOffset(), ref.getScrollOffset() + SCROLL_STEP);
-        ref.scrollTo(next);
-      }
-    };
-    (stdin as NodeJS.EventEmitter).on("mouse_scroll", handler);
-    return () => { (stdin as NodeJS.EventEmitter).off("mouse_scroll", handler); };
-  }, [stdin]);
 
   const [streamContent, setStreamContent] = useState("");
   const [thinkingChars, setThinkingChars] = useState(0);
   const [thinkingPreview, setThinkingPreview] = useState("");
   const [busy, setBusy] = useState(false);
+  // Global visibility toggles for thinking blocks and tool results (ctrl+t / ctrl+o)
+  const [thinkingExpanded, setThinkingExpanded] = useState(false);
+  const [toolsExpanded, setToolsExpanded] = useState(false);
   const [embeddingBusy, setEmbeddingBusy] = useState(false);
   const [activeTool, setActiveTool] = useState<string | null>(null);
 
@@ -251,6 +214,11 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
   const [pickerSessions, setPickerSessions] = useState<Session[]>([]);
   const [showApiKeyPrompt, setShowApiKeyPrompt] = useState(false);
   const [pastedContent, setPastedContent] = useState<string | null>(null);
+  const [activeLoop, setActiveLoop] = useState<Loop | null>(null);
+  const [showLoopPicker, setShowLoopPicker] = useState(false);
+  const [loopPickerLoops, setLoopPickerLoops] = useState<Loop[]>([]);
+  // Resolves when the user submits a message while the loop runner is awaiting input
+  const loopInputResolverRef = useRef<((s: string) => void) | null>(null);
 
   // Refs (mutated during streaming, not tracked by React)
   const histRef = useRef(new ConversationHistory(historyLimit));
@@ -368,9 +336,20 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
 
   // Register paste handler once — paste.ts intercepts bracketed paste sequences
   // before Ink sees them, so the full paste lands here in one setState call.
+  // When bracketed paste fires with no text (image-only clipboard), also check
+  // clipboard for an image — Windows Terminal intercepts ctrl+V for paste so the
+  // raw key never reaches useInput when the terminal handles it as a paste action.
   useEffect(() => {
     setPasteHandler((text) => {
-      setPastedContent(text);
+      if (!text) {
+        const img = readImageFromClipboard();
+        if (img) {
+          setPendingImages((prev) => [...prev, img]);
+          addCompleted({ id: makeId("sys"), role: "system", content: `Image attached: ${img.label}` });
+          return;
+        }
+      }
+      setPastedContent(text || null);
     });
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -459,9 +438,41 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
       return;
     }
 
+    // Page up/down — scroll half a page; up/down arrows — scroll 3 lines.
+    // Works even while busy so user can read history.
+    // Up/down come from both keyboard arrows and mouse wheel (?1007h alternate scroll mode).
+    if (key.pageUp || key.upArrow) {
+      const ref = scrollRef.current;
+      if (ref) {
+        const step = key.pageUp ? Math.max(3, Math.floor(msgAreaHeightRef.current / 2)) : 3;
+        ref.scrollTo(Math.max(0, ref.getScrollOffset() - step));
+      }
+      return;
+    }
+    if (key.pageDown || key.downArrow) {
+      const ref = scrollRef.current;
+      if (ref) {
+        const step = key.pageDown ? Math.max(3, Math.floor(msgAreaHeightRef.current / 2)) : 3;
+        ref.scrollTo(Math.min(ref.getBottomOffset(), ref.getScrollOffset() + step));
+      }
+      return;
+    }
+
     if (busy || showPicker || showApiKeyPrompt) return;
 
-    if (key.upArrow) {
+// ctrl+t: toggle thinking blocks expanded/collapsed
+    if (key.ctrl && typed === "t") {
+      setThinkingExpanded((v) => !v);
+      return;
+    }
+    // ctrl+o: toggle tool result details expanded/collapsed
+    if (key.ctrl && typed === "o") {
+      setToolsExpanded((v) => !v);
+      return;
+    }
+
+    // ctrl+p / ctrl+n — input history navigation (readline-style)
+    if (key.ctrl && typed === "p") {
       if (inputHistory.length === 0) return;
       if (historyIdx === null) {
         setDraft(input);
@@ -476,7 +487,7 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
       return;
     }
 
-    if (key.downArrow) {
+    if (key.ctrl && typed === "n") {
       if (historyIdx === null) return;
       const idx = historyIdx + 1;
       if (idx >= inputHistory.length) {
@@ -504,15 +515,25 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
       setPastedContent(null);
 
       // Combine typed text with pasted content; slash commands ignore paste
-      const trimmed =
+      let trimmed =
         typed.startsWith("/") || !pasted
           ? typed
           : typed
           ? typed + "\n\n" + pasted
           : pasted;
 
+      // Autocomplete partial slash commands on Enter: /ex → /exit, /lo → /loop, etc.
+      if (trimmed.startsWith("/")) {
+        const isExact = SLASH_COMMANDS.includes(trimmed)
+          || trimmed.startsWith("/backend ")
+          || trimmed.startsWith("/loop ");
+        if (!isExact) {
+          const firstMatch = SLASH_COMMANDS.find((cmd) => cmd.startsWith(trimmed));
+          if (firstMatch) trimmed = firstMatch;
+        }
+      }
+
       if (!trimmed && images.length === 0) return;
-      if (!trimmed) return;
 
       // While busy: queue the message for auto-submission after current task finishes.
       if (busyRef.current) {
@@ -545,6 +566,9 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
             "  /resume           switch session",
             "  /compact          compress conversation history",
             "  /apikey           set or update Anthropic API key",
+            "  /loop             pick a loop and enter loop mode",
+            "  /loop <name>      activate a loop by name",
+            "  /loop off         exit loop mode",
             "  /exit             quit",
           ].join("\n"),
         });
@@ -664,6 +688,42 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
         return;
       }
 
+      if (trimmed === "/loop off" || trimmed === "/loop stop") {
+        setActiveLoop(null);
+        addCompleted({ id: makeId("sys"), role: "system", content: "Loop mode off." });
+        return;
+      }
+
+      if (trimmed === "/loop") {
+        const loops = loadLoops();
+        setLoopPickerLoops(loops);
+        setShowLoopPicker(true);
+        return;
+      }
+
+      if (trimmed.startsWith("/loop ")) {
+        // /loop <name> — activate by name without picker
+        const name = trimmed.slice("/loop ".length).trim();
+        if (name === "off" || name === "stop") {
+          setActiveLoop(null);
+          addCompleted({ id: makeId("sys"), role: "system", content: "Loop mode off." });
+          return;
+        }
+        const loops = loadLoops();
+        const found = loops.find((l) => l.name.toLowerCase() === name.toLowerCase());
+        if (!found) {
+          addCompleted({ id: makeId("sys"), role: "system", content: `Loop not found: "${name}". Use /loop to pick from list.` });
+          return;
+        }
+        setActiveLoop(found);
+        addCompleted({
+          id: makeId("sys"),
+          role: "system",
+          content: `Loop mode: ${found.name}${found.description ? `  —  ${found.description}` : ""}\nType your task and each message will run through the loop. Type /loop off to exit.`,
+        });
+        return;
+      }
+
       if (trimmed.startsWith("/")) {
         // Enter on partial: if exactly one command matches, execute it
         const partialMatches = SLASH_COMMANDS.filter((cmd) => cmd.startsWith(trimmed));
@@ -676,6 +736,52 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
           role: "system",
           content: `Unknown command: ${trimmed}  (type /help for commands)`,
         });
+        return;
+      }
+
+      //  loop input resolver — mid-loop user prompts bypass normal submit
+
+      if (loopInputResolverRef.current) {
+        const resolve = loopInputResolverRef.current;
+        loopInputResolverRef.current = null;
+        addCompleted({ id: makeId("user"), role: "user", content: trimmed });
+        snapToBottom();
+        setBusy(true);
+        resolve(trimmed);
+        return;
+      }
+
+      //  loop mode — route message through active loop
+
+      if (activeLoop) {
+        setBusy(true);
+        snapToBottom();
+        addCompleted({ id: makeId("user"), role: "user", content: trimmed });
+
+        const loop = activeLoop;
+        try {
+          await runLoopTui(loop, trimmed, runtimeConfig, {
+            onMessage: (text) => {
+              addCompleted({ id: makeId("sys"), role: "system", content: text });
+              snapToBottom();
+            },
+            waitForInput: (prompt) => {
+              addCompleted({ id: makeId("sys"), role: "system", content: prompt });
+              snapToBottom();
+              setBusy(false);
+              return new Promise<string>((resolve) => {
+                loopInputResolverRef.current = resolve;
+              });
+            },
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          addCompleted({ id: makeId("sys"), role: "system", content: `Loop error: ${msg}` });
+        } finally {
+          loopInputResolverRef.current = null;
+          setBusy(false);
+          snapToBottom();
+        }
         return;
       }
 
@@ -787,6 +893,10 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
       };
 
       try {
+        // Refresh the module-level API key on every call so vision works even if
+        // the mount-time useEffect fired before config was available.
+        const currentKey = runtimeConfig.anthropicApiKey || process.env.ANTHROPIC_API_KEY;
+        if (currentKey) setRiteApiKey(currentKey);
         const backendFn = getBackend(assistantBackend);
         for await (const event of backendFn(enriched, abortController.signal, images.length > 0 ? images : undefined)) {
           if (event.type === "text") {
@@ -958,9 +1068,18 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
   //  render prep (must be before early returns — hooks can't come after conditional returns)
 
   const isWorking = busy || embeddingBusy;
-  const sessionLabel = sessionRef.current
+  const sessionLabel = activeLoop
+    ? `loop:${activeLoop.name}`
+    : sessionRef.current
     ? (sessionRef.current.name ?? sessionRef.current.id.slice(0, 10))
     : "";
+
+  // Set terminal tab title when session label changes (OSC 0 = icon name + window title)
+  useEffect(() => {
+    if (sessionLabel) {
+      process.stdout.write(`\x1b]0;${sessionLabel}\x07`);
+    }
+  }, [sessionLabel]);
 
   const thinkingSummary =
     thinkingChars > 0 && streamContent
@@ -981,11 +1100,26 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
 
   const hasLiveArea = isWorking;
 
-  // Composer height: status bar (1) + border+input box (3) + hints (1) + optionals + margin
-  const composerHeight = 5
+  // Compute composer height from actual wrapping math so the total layout never exceeds
+  // termRows-1 (which would cause Ink to switch from eraseLines to clearTerminal/flicker).
+  // Hints box has paddingX={2} → content width = termCols-4.
+  // Input box has paddingX={1} + border(2) + "> " prefix(3) → text width = termCols-7.
+  const hintsText = isWorking
+    ? (input.trim() ? "enter queue  esc cancel  ctrl+c exit" : "esc cancel  ctrl+c exit")
+    : "enter send  tab autocomplete  up/down history  ctrl+c exit  /help /clear /memory /backend /resume";
+  const hintsContentWidth = Math.max(20, termCols - 4);
+  const hintsLines = Math.ceil(hintsText.length / hintsContentWidth);
+  const inputContentWidth = Math.max(10, termCols - 7);
+  const inputLines = Math.max(1, Math.ceil((input.length + 1) / inputContentWidth));
+  const composerHeight = 1 // status bar
+    + 1 // top border
+    + inputLines // input row (grows when text wraps)
+    + 1 // bottom border
+    + (autocompleteSuggestions.length > 0 ? 1 : 0)
     + (pastedContent ? 1 : 0)
     + (pendingImages.length > 0 ? 1 : 0)
     + (queuedCount > 0 ? 1 : 0)
+    + hintsLines
     + 1; // safety margin
 
   // Live area height when busy
@@ -1004,6 +1138,7 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
   // Use termRows-1 so outputHeight < stdout.rows — keeps Ink on the eraseLines
   // path instead of clearTerminal (\x1b[2J), which blanks the screen and flickers.
   const msgAreaHeight = Math.max(3, termRows - composerHeight - liveAreaHeight - SCROLL_INDICATOR_HEIGHT - 1);
+  msgAreaHeightRef.current = msgAreaHeight;
 
   // Logo shown at startup until the first message arrives
   const showLogo = completed.length === 0 && !isWorking;
@@ -1026,6 +1161,26 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
       if (atBottomRef.current) scrollRef.current?.scrollToBottom();
     }, 200);
   }, []);
+
+  //  loop picker overlay
+
+  if (showLoopPicker) {
+    return (
+      <LoopPicker
+        loops={loopPickerLoops}
+        onSelect={(loop) => {
+          setShowLoopPicker(false);
+          setActiveLoop(loop);
+          addCompleted({
+            id: makeId("sys"),
+            role: "system",
+            content: `Loop mode: ${loop.name}${loop.description ? `  —  ${loop.description}` : ""}\nType your task and each message will run through the loop. Type /loop off to exit.`,
+          });
+        }}
+        onCancel={() => setShowLoopPicker(false)}
+      />
+    );
+  }
 
   //  api key prompt overlay
 
@@ -1076,9 +1231,7 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
     <Box flexDirection="column" height={termRows - 1}>
       {/* Scroll indicator — 1 line reserved always to prevent layout jump */}
       <Box paddingX={1} height={SCROLL_INDICATOR_HEIGHT}>
-        {scrolledUp && (
-          <Text dimColor>↑ scrolled — mouse wheel to navigate</Text>
-        )}
+        {scrolledUp && <Text dimColor>↑ scrolled — pgup/pgdn to navigate</Text>}
       </Box>
 
       {/* Message area — ink-scroll-view handles true smooth line-level scrolling */}
@@ -1091,7 +1244,7 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
       >
         {showLogo && <Logo />}
         {(completed.length > RENDERED_MSG_CAP ? completed.slice(-RENDERED_MSG_CAP) : completed).map((msg) => (
-          <MessageBubble key={msg.id} message={msg} />
+          <MessageBubble key={msg.id} message={msg} thinkingExpanded={thinkingExpanded} toolsExpanded={toolsExpanded} />
         ))}
       </ScrollView>
 
@@ -1137,11 +1290,10 @@ export async function startRepl(
   resumeSessionId?: string
 ): Promise<void> {
   installBracketedPaste(); // must run before render() so stdin is patched before Ink reads it
-  const uninstallMouseFilter = installStdinMouseFilter(); // filter SGR mouse bytes before Ink reads them
   process.stdout.write("\x1b[?1049h"); // enter alt screen
   process.stdout.write("\x1b[?25l"); // hide terminal cursor (TextInput renders its own block cursor)
-  process.stdout.write("\x1b[?1000h\x1b[?1006h"); // enable SGR mouse (scroll wheel events)
   process.stdout.write("\x1b[2J\x1b[H"); // clear alt screen, cursor to top-left
+  process.stdout.write("\x1b[?1007h"); // alternate scroll mode: wheel → cursor keys, native selection preserved
   try {
     const { waitUntilExit } = render(
       <Repl
@@ -1153,9 +1305,8 @@ export async function startRepl(
     );
     await waitUntilExit();
   } finally {
-    uninstallMouseFilter();
     uninstallBracketedPaste();
-    process.stdout.write("\x1b[?1000l\x1b[?1006l"); // disable SGR mouse
+    process.stdout.write("\x1b[?1007l"); // disable alternate scroll mode
     process.stdout.write("\x1b[?25h"); // restore cursor
     process.stdout.write("\x1b[?1049l"); // exit alt screen (restores previous terminal content)
   }

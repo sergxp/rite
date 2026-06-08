@@ -145,7 +145,7 @@ function CodeBlock({ language, code }: { language?: string; code: string }) {
         {codeLanguageLabel(language)}
       </Text>
       <Box paddingX={1} borderStyle="round" borderColor="blueBright">
-        <Text color="whiteBright">{highlighted}</Text>
+        <Text color="white">{highlighted}</Text>
       </Box>
     </Box>
   );
@@ -166,14 +166,14 @@ function renderBlocks(tokens: BlockToken[] | undefined, keyPrefix: string): Reac
       case "paragraph":
         nodes.push(
           <Box key={key} marginTop={index === 0 ? 0 : 1}>
-            <Text wrap="wrap" color="whiteBright">{inlineNodes(token.tokens as InlineToken[] | undefined, key)}</Text>
+            <Text wrap="wrap" color="white">{inlineNodes(token.tokens as InlineToken[] | undefined, key)}</Text>
           </Box>
         );
         break;
       case "text":
         nodes.push(
           <Box key={key} marginTop={index === 0 ? 0 : 1}>
-            <Text wrap="wrap" color="whiteBright">
+            <Text wrap="wrap" color="white">
               {token.tokens && token.tokens.length > 0
                 ? inlineNodes(token.tokens as InlineToken[], key)
                 : (token.text ?? token.raw ?? "")}
@@ -226,7 +226,7 @@ function renderBlocks(tokens: BlockToken[] | undefined, keyPrefix: string): Reac
                   <Box flexDirection="column" flexGrow={1}>
                     {item.tokens && item.tokens.length > 0
                       ? renderBlocks(item.tokens as BlockToken[], `${key}-${itemIndex}`)
-                      : <Text wrap="wrap" color="whiteBright">{item.text ?? item.raw ?? ""}</Text>}
+                      : <Text wrap="wrap" color="white">{item.text ?? item.raw ?? ""}</Text>}
                   </Box>
                 </Box>
               );
@@ -237,7 +237,7 @@ function renderBlocks(tokens: BlockToken[] | undefined, keyPrefix: string): Reac
       case "hr":
         nodes.push(
           <Box key={key} marginTop={1} marginBottom={1}>
-            <Text color="whiteBright">
+            <Text color="white">
               {"─".repeat(32)}
             </Text>
           </Box>
@@ -246,7 +246,7 @@ function renderBlocks(tokens: BlockToken[] | undefined, keyPrefix: string): Reac
       default:
         nodes.push(
           <Box key={key} marginTop={index === 0 ? 0 : 1}>
-            <Text wrap="wrap" color="whiteBright">{token.raw ?? token.text ?? ""}</Text>
+            <Text wrap="wrap" color="white">{token.raw ?? token.text ?? ""}</Text>
           </Box>
         );
         break;
@@ -256,11 +256,22 @@ function renderBlocks(tokens: BlockToken[] | undefined, keyPrefix: string): Reac
   return nodes;
 }
 
-export const MarkdownMessage = React.memo(function MarkdownMessage({ content }: { content: string }) {
-  const tokens = React.useMemo(
-    () => marked.lexer(content, { gfm: true, breaks: true }) as BlockToken[],
-    [content]
-  );
+// Module-level parse cache — avoids re-lexing identical content across re-renders.
+// Capped at 500 entries to bound memory in very long sessions.
+const _lexCache = new Map<string, BlockToken[]>();
+function cachedLex(content: string): BlockToken[] {
+  const hit = _lexCache.get(content);
+  if (hit) return hit;
+  const tokens = marked.lexer(content, { gfm: true, breaks: true }) as BlockToken[];
+  if (_lexCache.size >= 500) {
+    // evict oldest entry
+    _lexCache.delete(_lexCache.keys().next().value!);
+  }
+  _lexCache.set(content, tokens);
+  return tokens;
+}
 
+export const MarkdownMessage = React.memo(function MarkdownMessage({ content }: { content: string }) {
+  const tokens = React.useMemo(() => cachedLex(content), [content]);
   return <Box flexDirection="column">{renderBlocks(tokens, "root")}</Box>;
 });

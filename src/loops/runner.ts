@@ -9,6 +9,7 @@ import { runLlmStep } from "./steps/llm.js";
 import { runShellStep } from "./steps/shell.js";
 import { runHumanInputStep } from "./steps/human_input.js";
 import { runConditionStep } from "./steps/condition.js";
+import { runReviewStep } from "./steps/review.js";
 
 export interface StepContext {
   context: string;
@@ -17,17 +18,9 @@ export interface StepContext {
   config: RiteConfig;
 }
 
-function waitForEnter(message: string): Promise<void> {
-  return new Promise((resolve) => {
-    const rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stdout,
-    });
-    rl.question(message, () => {
-      rl.close();
-      resolve();
-    });
-  });
+export interface LoopCallbacks {
+  onMessage(text: string): void;
+  waitForInput(prompt: string): Promise<string>;
 }
 
 function findStepById(steps: Step[], id: string): Step | undefined {
@@ -38,12 +31,14 @@ function stepIndexById(steps: Step[], id: string): number {
   return steps.findIndex((s) => s.id === id);
 }
 
-export async function runLoop(
+async function runLoopCore(
   loop: Loop,
   context: string,
-  config: RiteConfig
+  config: RiteConfig,
+  sessionId: string,
+  log: (s: string) => void,
+  askUser: (prompt: string) => Promise<string>
 ): Promise<void> {
-  const sessionId = makeSessionId();
   const memories = loadMemories();
   const stepContext: StepContext = {
     context,
@@ -54,12 +49,13 @@ export async function runLoop(
 
   const steps = loop.steps;
   if (steps.length === 0) {
-    console.log("Loop has no steps.");
+    log("Loop has no steps.");
     return;
   }
 
   let currentIndex = 0;
   let forceNextId: string | undefined;
+  const reviewIterations: Record<string, number> = {};
 
   while (currentIndex < steps.length) {
     const step = forceNextId
@@ -70,19 +66,15 @@ export async function runLoop(
     if (!step) break;
 
     const label = step.name ?? step.id;
-    console.log(`\n── Step: ${label} ──────────────────`);
+    log(`\n── Step: ${label} ──────────────────`);
 
     if (step.human_checkpoint) {
-      await waitForEnter(
-        `Press Enter to run step "${label}", or Ctrl+C to abort: `
-      );
+      await askUser(`Press Enter to run step "${label}", or Ctrl+C to abort: `);
     }
 
     let output = "";
     let nextStepId: string | undefined;
     const stepStartMs = Date.now();
-
-    // Step-type-specific audit fields
     let auditExtra: Record<string, unknown> = {};
 
     switch (step.type) {
@@ -104,7 +96,7 @@ export async function runLoop(
         break;
       }
       case "human_input": {
-        output = await runHumanInputStep(step, stepContext);
+        output = await askUser(step.prompt);
         auditExtra = { humanPrompt: step.prompt };
         break;
       }
@@ -117,6 +109,39 @@ export async function runLoop(
           conditionRawResponse: result.rawResponse,
           branchTaken: nextStepId,
         };
+        break;
+      }
+      case "review": {
+        const iteration = (reviewIterations[step.id] ?? 0) + 1;
+        reviewIterations[step.id] = iteration;
+        const maxIter = step.max_iterations ?? 3;
+
+        const implOutput = stepContext.stepOutputs[step.implementation_step] ?? "";
+        const result = await runReviewStep(step, stepContext, implOutput);
+        output = result.feedback;
+
+        if (result.passed) {
+          log(`\n✓ Review passed.`);
+          auditExtra = { passed: true, feedback: "", iteration };
+        } else if (iteration >= maxIter) {
+          log(`\n⚠ Review failed after ${maxIter} attempt(s). Max iterations reached.`);
+          log(`  Final feedback: ${result.feedback}`);
+          const userInstruction = await askUser(
+            `What would you like to do? (type instructions, or leave blank to abort)`
+          );
+          if (userInstruction.trim()) {
+            stepContext.stepOutputs[step.id] = `${result.feedback}\n\nUser instruction: ${userInstruction}`;
+            output = stepContext.stepOutputs[step.id];
+            reviewIterations[step.id] = 0;
+            nextStepId = step.implementation_step;
+          }
+          auditExtra = { passed: false, feedback: result.feedback, iteration, exhausted: true, userInstruction };
+        } else {
+          log(`\n✗ Review failed (attempt ${iteration}/${maxIter}). Sending back to "${step.implementation_step}".`);
+          log(`  Feedback: ${result.feedback}`);
+          auditExtra = { passed: false, feedback: result.feedback, iteration };
+          nextStepId = step.implementation_step;
+        }
         break;
       }
     }
@@ -134,12 +159,9 @@ export async function runLoop(
       ...auditExtra,
     });
 
-    // Determine next step
-    if (step.type === "condition" && nextStepId) {
+    if ((step.type === "condition" || step.type === "review") && nextStepId) {
       const nextIdx = stepIndexById(steps, nextStepId);
-      if (nextIdx === -1) {
-        break;
-      }
+      if (nextIdx === -1) break;
       currentIndex = nextIdx;
     } else if (step.next) {
       const nextIdx = stepIndexById(steps, step.next);
@@ -151,7 +173,7 @@ export async function runLoop(
     }
   }
 
-  console.log("\n✓ Loop complete.");
+  log("\n✓ Loop complete.");
 
   const allOutputs = Object.entries(stepContext.stepOutputs)
     .map(([id, out]) => `[${id}]: ${out}`)
@@ -165,7 +187,6 @@ export async function runLoop(
     sessionId
   );
 
-  // Save loop run as a session using the same sessionId generated at the top
   const session = createSession(config, "loop");
   session.id = sessionId;
   session.loopName = loop.name;
@@ -184,4 +205,30 @@ export async function runLoop(
     session.turns.push({ role: "assistant", content: out });
   }
   saveSession(session);
+}
+
+export async function runLoop(
+  loop: Loop,
+  context: string,
+  config: RiteConfig
+): Promise<void> {
+  const sessionId = makeSessionId();
+
+  const askUser = (prompt: string): Promise<string> =>
+    new Promise((resolve) => {
+      const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+      rl.question(prompt, (answer) => { rl.close(); resolve(answer.trim()); });
+    });
+
+  await runLoopCore(loop, context, config, sessionId, console.log, askUser);
+}
+
+export async function runLoopTui(
+  loop: Loop,
+  context: string,
+  config: RiteConfig,
+  callbacks: LoopCallbacks
+): Promise<void> {
+  const sessionId = makeSessionId();
+  await runLoopCore(loop, context, config, sessionId, callbacks.onMessage, callbacks.waitForInput);
 }

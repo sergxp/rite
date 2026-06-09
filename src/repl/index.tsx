@@ -428,7 +428,7 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
         addCompleted({ id: makeId("sys"), role: "system", content: `Image attached: ${img.label}` });
         return; // consume the keypress — don't type into the text input
       }
-      // No image on clipboard — tell the user so they know the key reached rite
+      // No image on clipboard — tell the user so they know the key reached Rite
       addCompleted({ id: makeId("sys"), role: "system", content: "ctrl+v: no image in clipboard (if this message never appears, your terminal is consuming the key)" });
     }
 
@@ -1124,7 +1124,7 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
 
   // Live area height when busy
   const liveAreaHeight = hasLiveArea ? (() => {
-    let h = 2; // "rite" header + marginBottom
+    let h = 2; // "Rite" header + marginBottom
     if (thinkingPreview && !streamPreview) h += Math.min(LIVE_PREVIEW_LINES, thinkingPreview.split("\n").length);
     if (thinkingSummary) h += 1;
     if (activeTool) h += 1;

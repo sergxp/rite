@@ -23,7 +23,7 @@ import {
 const program = new Command();
 
 program
-  .name("rite")
+  .name("Rite")
   .description("A CLI that wraps Claude Code with persistent memory")
   .version("0.1.0");
 

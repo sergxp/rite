@@ -24,7 +24,7 @@ export function pathToSlug(absPath: string): string {
 }
 
 /**
- * The single root where all rite memories live.
+ * The single root where all Rite memories live.
  */
 export function getMemoryRoot(): string {
   return join(HOME, ".rite", "memory");

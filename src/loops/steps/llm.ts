@@ -10,7 +10,8 @@ export interface LlmStepResult {
 
 export async function runLlmStep(
   step: LlmStep,
-  context: StepContext
+  context: StepContext,
+  options?: { onToken?: (text: string) => void; signal?: AbortSignal }
 ): Promise<LlmStepResult> {
   const backend = context.config.backend ?? "claude";
   const backendFn = getBackend(backend);
@@ -18,11 +19,12 @@ export async function runLlmStep(
   const resolvedPrompt = resolveTemplate(step.prompt, context);
 
   let output = "";
-  const stream = backendFn(resolvedPrompt);
+  const stream = backendFn(resolvedPrompt, options?.signal);
 
   for await (const event of stream) {
     if (event.type === "text") {
       process.stdout.write(event.content);
+      options?.onToken?.(event.content);
       output += event.content;
     }
     // tool_call / tool_done: print a brief status line to stdout

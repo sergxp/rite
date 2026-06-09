@@ -160,16 +160,22 @@ async function* callClaudeSdk(
 export async function* callClaude(
   prompt: string,
   signal?: AbortSignal,
-  images?: ImageAttachment[]
+  images?: ImageAttachment[],
+  opts?: { resumeSessionId?: string }
 ): AsyncIterable<BackendEvent> {
   if (images && images.length > 0) {
     yield* callClaudeSdk(prompt, images, signal);
     return;
   }
 
+  const args = ["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--dangerously-skip-permissions"];
+  if (opts?.resumeSessionId) {
+    args.push("--resume", opts.resumeSessionId);
+  }
+
   const subprocess = execa(
     "claude",
-    ["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--dangerously-skip-permissions"],
+    args,
     { reject: false, stdin: "pipe", input: prompt, cancelSignal: signal }
   );
 
@@ -211,6 +217,15 @@ export async function* callClaude(
           event = JSON.parse(line) as Record<string, unknown>;
         } catch {
           // Non-JSON line from CLI (e.g. debug output) — discard, don't surface as text.
+          continue;
+        }
+
+        // Capture session ID from the init event so callers can resume the session.
+        if (event.type === "system" && (event.subtype as string) === "init") {
+          const sid = event.session_id;
+          if (typeof sid === "string" && sid) {
+            yield { type: "session_id", sessionId: sid };
+          }
           continue;
         }
 

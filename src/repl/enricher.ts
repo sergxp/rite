@@ -5,7 +5,8 @@ export function buildEnrichedPrompt(
   userMessage: string,
   alwaysMemories: MemoryFile[],
   semanticMemories: MemoryFile[],
-  history: ConversationHistory
+  history: ConversationHistory,
+  includeHistory = true
 ): string {
   const parts: string[] = [];
 
@@ -35,9 +36,11 @@ export function buildEnrichedPrompt(
     parts.push(`<memory>\n${sections.join("\n\n")}\n</memory>`);
   }
 
-  const historyStr = history.getFormatted();
-  if (historyStr.trim()) {
-    parts.push(`<history>\n${historyStr}\n</history>`);
+  if (includeHistory) {
+    const historyStr = history.getFormatted();
+    if (historyStr.trim()) {
+      parts.push(`<history>\n${historyStr}\n</history>`);
+    }
   }
 
   parts.push(`<message>\n${userMessage}\n</message>`);

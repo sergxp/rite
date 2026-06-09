@@ -4,7 +4,11 @@ import { callCopilot } from "./copilot.js";
 import type { BackendName } from "../config/types.js";
 import type { BackendEvent, ImageAttachment } from "./events.js";
 export type { BackendEvent, ImageAttachment };
-export type BackendFn = (prompt: string, signal?: AbortSignal, images?: ImageAttachment[]) => AsyncIterable<BackendEvent>;
+export interface BackendCallOpts {
+  resumeSessionId?: string;
+}
+
+export type BackendFn = (prompt: string, signal?: AbortSignal, images?: ImageAttachment[], opts?: BackendCallOpts) => AsyncIterable<BackendEvent>;
 
 export function getBackend(name: BackendName): BackendFn {
   switch (name) {

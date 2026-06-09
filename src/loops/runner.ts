@@ -21,6 +21,8 @@ export interface StepContext {
 export interface LoopCallbacks {
   onMessage(text: string): void;
   waitForInput(prompt: string): Promise<string>;
+  onStepStart?(stepId: string, stepLabel: string, stepType: string): void;
+  onToken?(text: string): void;
 }
 
 function findStepById(steps: Step[], id: string): Step | undefined {
@@ -37,7 +39,10 @@ async function runLoopCore(
   config: RiteConfig,
   sessionId: string,
   log: (s: string) => void,
-  askUser: (prompt: string) => Promise<string>
+  askUser: (prompt: string) => Promise<string>,
+  onStepStart?: (stepId: string, stepLabel: string, stepType: string) => void,
+  onToken?: (text: string) => void,
+  signal?: AbortSignal
 ): Promise<void> {
   const memories = loadMemories();
   const stepContext: StepContext = {
@@ -58,6 +63,8 @@ async function runLoopCore(
   const reviewIterations: Record<string, number> = {};
 
   while (currentIndex < steps.length) {
+    if (signal?.aborted) break;
+
     const step = forceNextId
       ? findStepById(steps, forceNextId)
       : steps[currentIndex];
@@ -67,6 +74,7 @@ async function runLoopCore(
 
     const label = step.name ?? step.id;
     log(`\n── Step: ${label} ──────────────────`);
+    onStepStart?.(step.id, label, step.type);
 
     if (step.human_checkpoint) {
       await askUser(`Press Enter to run step "${label}", or Ctrl+C to abort: `);
@@ -79,7 +87,7 @@ async function runLoopCore(
 
     switch (step.type) {
       case "llm": {
-        const result = await runLlmStep(step, stepContext);
+        const result = await runLlmStep(step, stepContext, { onToken, signal });
         output = result.output;
         auditExtra = { resolvedPrompt: result.resolvedPrompt };
         break;
@@ -227,8 +235,16 @@ export async function runLoopTui(
   loop: Loop,
   context: string,
   config: RiteConfig,
-  callbacks: LoopCallbacks
+  callbacks: LoopCallbacks,
+  signal?: AbortSignal
 ): Promise<void> {
   const sessionId = makeSessionId();
-  await runLoopCore(loop, context, config, sessionId, callbacks.onMessage, callbacks.waitForInput);
+  await runLoopCore(
+    loop, context, config, sessionId,
+    callbacks.onMessage,
+    callbacks.waitForInput,
+    callbacks.onStepStart,
+    callbacks.onToken,
+    signal
+  );
 }

@@ -16,6 +16,8 @@ export interface Session {
   type: "repl" | "loop";
   turns: Array<{ role: "user" | "assistant"; content: string }>;
   memoriesActive: SessionMemoryRef[];
+  /** Persisted Claude CLI session ID so the same JSONL conversation is resumed across rite restarts. */
+  claudeSessionId?: string;
   loopName?: string;
   loopContext?: string;
   stepOutputs?: Record<string, string>;

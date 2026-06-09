@@ -1,5 +1,5 @@
 import React, { useState, useRef, useCallback, useEffect } from "react";
-import { render, Box, Text, useApp, useInput } from "ink";
+import { render, Box, Text, useApp, useInput, measureElement } from "ink";
 import { ScrollView, type ScrollViewRef } from "ink-scroll-view";
 import { ConversationHistory } from "./history.js";
 import { buildEnrichedPrompt } from "./enricher.js";
@@ -17,8 +17,9 @@ import {
 import { autoNameSession } from "../sessions/namer.js";
 import { SessionPicker } from "../sessions/picker.js";
 import { appendAuditEvent } from "../audit/writer.js";
-import { Composer } from "./composer.js";
+import { Composer, type ComposerHandle, type ComposerMetrics } from "./composer.js";
 import { MessageBubble, type Message, type MessageRole } from "./message.js";
+import { MarkdownMessage } from "./markdown.js";
 import { readImageFromClipboard, type ImageAttachment } from "./image.js";
 import {
   setBackend,
@@ -33,6 +34,7 @@ import { Logo, LOGO_HEIGHT } from "./logo.js";
 import { LoopPicker } from "./loop-picker.js";
 import { loadLoops } from "../loops/registry.js";
 import { runLoopTui } from "../loops/runner.js";
+import { checkMemoryCompliance } from "../loops/default-review.js";
 import type { BackendName, RiteConfig } from "../config/types.js";
 import type { MemoryFile } from "../memory/types.js";
 import type { Session } from "../sessions/types.js";
@@ -45,7 +47,6 @@ function makeId(prefix: string) {
   return `${prefix}-${Date.now()}-${_seq++}`;
 }
 
-const SPINNER = ["|", "/", "-", "\\", "|", "/", "-", "\\", "|", "/"];
 const RENDERED_MSG_CAP = 150;
 
 const SLASH_COMMANDS = [
@@ -83,62 +84,73 @@ interface ReplProps {
   resumeSessionId?: string;
 }
 
-// LiveArea is isolated so its 150ms spinner tick never touches Repl or the message list.
-interface LiveAreaProps {
+// Streaming bubble — rendered as the last child inside ScrollView while the
+// assistant is working. Shows step label, thinking preview, active tool, and
+// the accumulating response text in real time.
+interface StreamingState {
+  content: string;
   activeTool: string | null;
-  streamPreview: string;
-  thinkingPreview: string;
-  thinkingSummary: string | null;
-  previewLines: number;
+  stepLabel: string;
+  thinkingText: string;
+  thinkingChars: number;
 }
 
-const LiveArea = React.memo(function LiveArea({
-  activeTool,
-  streamPreview,
-  thinkingPreview,
-  thinkingSummary,
-  previewLines,
-}: LiveAreaProps) {
-  const [spinnerFrame, setSpinnerFrame] = useState(0);
-
-  useEffect(() => {
-    const t = setInterval(() => setSpinnerFrame((f) => (f + 1) % SPINNER.length), 150);
-    return () => clearInterval(t);
-  }, []);
+function StreamingBubble({ state }: { state: StreamingState }) {
+  const thinkingSummary =
+    state.thinkingChars > 0 && state.content
+      ? `reasoned for ${(state.thinkingChars / 1000).toFixed(1)}k chars`
+      : null;
 
   return (
-    <Box flexDirection="column" marginBottom={1}>
-      <Box paddingLeft={1}>
-        <Text color="greenBright" bold>Rite</Text>
-      </Box>
-      {thinkingPreview && !streamPreview && (
-        <Box paddingLeft={3}>
-          <Text wrap="wrap" dimColor>{(() => {
-            const lines = thinkingPreview.split("\n");
-            return lines.length <= previewLines ? thinkingPreview : lines.slice(-previewLines).join("\n");
-          })()}</Text>
-        </Box>
+    <Box flexDirection="column" paddingLeft={2} paddingTop={1}>
+      {state.stepLabel && (
+        <Text dimColor>→ {state.stepLabel}</Text>
+      )}
+      {state.thinkingText && !state.content && (
+        <Text wrap="wrap" dimColor>
+          {state.thinkingText.split("\n").slice(-8).join("\n")}
+        </Text>
       )}
       {thinkingSummary && (
-        <Box paddingLeft={3}>
-          <Text dimColor>{thinkingSummary}</Text>
-        </Box>
+        <Text dimColor>{thinkingSummary}</Text>
       )}
-      {activeTool && (
-        <Box paddingLeft={3}>
-          <Text dimColor>{SPINNER[spinnerFrame]} {activeTool}</Text>
-        </Box>
+      {state.activeTool && (
+        <Text dimColor>⏳ {state.activeTool}</Text>
       )}
-      {streamPreview && (
-        <Box paddingLeft={3}>
-          <Text wrap="wrap">{streamPreview}</Text>
-        </Box>
+      {state.content && (
+        <MarkdownMessage content={state.content} />
       )}
-      {!streamPreview && !thinkingPreview && !activeTool && (
-        <Box paddingLeft={3}>
-          <Text dimColor>{SPINNER[spinnerFrame]}</Text>
-        </Box>
+      {!state.content && !state.thinkingText && !state.activeTool && (
+        <Text dimColor>…</Text>
       )}
+    </Box>
+  );
+}
+
+// Wraps MessageBubble with Yoga measurement. Reports (id, height) on every
+// content/visibility change so the parent can window off-screen messages.
+const MeasuredBubble = React.memo(function MeasuredBubble({
+  message,
+  thinkingExpanded,
+  toolsExpanded,
+  onMeasure,
+}: {
+  message: Message;
+  thinkingExpanded: boolean;
+  toolsExpanded: boolean;
+  onMeasure: (id: string, height: number) => void;
+}) {
+  const ref = useRef<Parameters<typeof measureElement>[0]>(null);
+  useEffect(() => {
+    if (ref.current) {
+      const { height } = measureElement(ref.current);
+      onMeasure(message.id, height);
+    }
+  }, [message.id, message.content, message.toolResult, thinkingExpanded, toolsExpanded, onMeasure]);
+
+  return (
+    <Box ref={ref} flexDirection="column">
+      <MessageBubble message={message} thinkingExpanded={thinkingExpanded} toolsExpanded={toolsExpanded} />
     </Box>
   );
 });
@@ -169,37 +181,39 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
   const msgAreaHeightRef = useRef(10);
 
 
-  const [streamContent, setStreamContent] = useState("");
-  const [thinkingChars, setThinkingChars] = useState(0);
-  const [thinkingPreview, setThinkingPreview] = useState("");
+  const [streamingState, setStreamingState] = useState<StreamingState | null>(null);
   const [busy, setBusy] = useState(false);
   // Global visibility toggles for thinking blocks and tool results (ctrl+t / ctrl+o)
   const [thinkingExpanded, setThinkingExpanded] = useState(false);
   const [toolsExpanded, setToolsExpanded] = useState(false);
   const [embeddingBusy, setEmbeddingBusy] = useState(false);
-  const [activeTool, setActiveTool] = useState<string | null>(null);
+  const activeToolRef = useRef<string | null>(null);
+  const stepLabelRef = useRef("");
 
-  // Input
-  const [input, setInput] = useState("");
+  // Input — managed inside Composer; Repl only tracks history for passing down
   const [inputHistory, setInputHistory] = useState<string[]>([]);
-  const [historyIdx, setHistoryIdx] = useState<number | null>(null);
-  const [draft, setDraft] = useState("");
-
-  const autocompleteSuggestions =
-    input.startsWith("/") && input.length > 1
-      ? SLASH_COMMANDS.filter((cmd) => cmd.startsWith(input))
-      : [];
-
-  const handleTab = useCallback(() => {
-    if (!input.startsWith("/") || input.length <= 1) return;
-    const matches = SLASH_COMMANDS.filter((cmd) => cmd.startsWith(input));
-    if (matches.length === 1) {
-      const completion = matches[0].endsWith(" ") ? matches[0] : matches[0] + " ";
-      setInput(completion);
-      setHistoryIdx(null);
-    }
-  }, [input]);
+  const composerRef = useRef<ComposerHandle>(null);
+  const autocompleteActiveRef = useRef(false);
+  // Layout metrics from Composer — only updates when layout actually changes (not every keystroke)
+  const [composerMetrics, setComposerMetrics] = useState<ComposerMetrics>({
+    inputLines: 1,
+    hasAutocomplete: false,
+    hasText: false,
+  });
   const [pendingImages, setPendingImages] = useState<ImageAttachment[]>([]);
+
+  // Virtual windowing: track per-message Yoga heights so off-screen messages
+  // can be replaced with equal-height spacers, reducing mounted node count.
+  const msgHeightsRef = useRef<Map<string, number>>(new Map());
+  const scrollOffsetRef = useRef(0);
+  const [, setWindowVersion] = useState(0);
+  const handleMeasure = useCallback((id: string, height: number) => {
+    const map = msgHeightsRef.current;
+    if (map.get(id) !== height) {
+      map.set(id, height);
+      setWindowVersion((v) => v + 1);
+    }
+  }, []);
 
   // App state
   const [assistantBackend, setAssistantBackend] =
@@ -219,10 +233,14 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
   const [loopPickerLoops, setLoopPickerLoops] = useState<Loop[]>([]);
   // Resolves when the user submits a message while the loop runner is awaiting input
   const loopInputResolverRef = useRef<((s: string) => void) | null>(null);
+  const loopTokenAccRef = useRef<string>("");
 
   // Refs (mutated during streaming, not tracked by React)
   const histRef = useRef(new ConversationHistory(historyLimit));
   const sessionRef = useRef<Session | null>(null);
+  // Persistent Claude session ID — captured from the first call's system/init event.
+  // Subsequent calls pass --resume so all turns share one Claude Code session.
+  const claudeSessionIdRef = useRef<string | null>(null);
   const liveRef = useRef("");
   const thinkingRef = useRef({ chars: 0, text: "" });
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -231,45 +249,30 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
   busyRef.current = busy;
   const pastedContentRef = useRef<string | null>(null);
   pastedContentRef.current = pastedContent;
-  const inputRef = useRef(input);
-  inputRef.current = input;
   // Type-ahead queue: messages typed while busy, auto-submitted when task finishes.
   const messageQueueRef = useRef<string[]>([]);
   const [queuedCount, setQueuedCount] = useState(0);
 
-  //  spinner + streaming poll (merged to reduce re-renders)
+  //  streaming poll — bundles all live state into one setStreamingState call per tick
 
   useEffect(() => {
     if (!busy && !embeddingBusy) {
       liveRef.current = "";
       thinkingRef.current = { chars: 0, text: "" };
-      setStreamContent("");
-      setThinkingChars(0);
-      setThinkingPreview("");
+      activeToolRef.current = null;
+      stepLabelRef.current = "";
+      setStreamingState(null);
       return;
     }
-    let lastContent = "";
-    let lastThinkingChars = 0;
-    let lastThinkingPreview = "";
-    // Poll refs for content changes — only setState when something actually changed
-    // so Repl doesn't re-render on silent ticks. Spinner ticks live in LiveArea.
     const t = setInterval(() => {
-      const content = liveRef.current;
-      if (content !== lastContent) {
-        lastContent = content;
-        setStreamContent(content);
-      }
-      const chars = thinkingRef.current.chars;
-      if (chars !== lastThinkingChars) {
-        lastThinkingChars = chars;
-        setThinkingChars(chars);
-      }
-      const preview = thinkingRef.current.text;
-      if (preview !== lastThinkingPreview) {
-        lastThinkingPreview = preview;
-        setThinkingPreview(preview);
-      }
-    }, 150);
+      setStreamingState({
+        content: liveRef.current,
+        activeTool: activeToolRef.current,
+        stepLabel: stepLabelRef.current,
+        thinkingText: thinkingRef.current.text,
+        thinkingChars: thinkingRef.current.chars,
+      });
+    }, 80);
     return () => clearInterval(t);
   }, [busy, embeddingBusy]);
 
@@ -309,6 +312,9 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
       try {
         const resumed = loadSession(resumeSessionId);
         sessionRef.current = resumed;
+        // Restore the persisted Claude session ID so the next turn resumes
+        // the same Claude JSONL conversation rather than starting a new one.
+        claudeSessionIdRef.current = resumed.claudeSessionId ?? null;
         histRef.current.clear();
         for (const t of resumed.turns) histRef.current.add(t.role, t.content);
         setAssistantBackend(resumed.backend);
@@ -405,15 +411,14 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
       return;
     }
 
-    // Escape: clear paste first; if busy, always cancel in-progress request
-    // (and clear any typed-ahead text). Type-ahead queuing uses Enter while busy.
+    // Escape: clear paste first; if busy, cancel in-progress request and clear typed-ahead text.
     if (key.escape) {
       if (pastedContentRef.current) {
         setPastedContent(null);
         return;
       }
       if (busyRef.current) {
-        setInput("");
+        composerRef.current?.clearInput();
         abortControllerRef.current?.abort();
         return;
       }
@@ -438,6 +443,12 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
       return;
     }
 
+    // Autocomplete is active — let Composer's useInput handle up/down navigation;
+    // skip scroll so the two handlers don't fight over arrow keys.
+    if (autocompleteActiveRef.current) {
+      if (key.upArrow || key.downArrow) return;
+    }
+
     // Page up/down — scroll half a page; up/down arrows — scroll 3 lines.
     // Works even while busy so user can read history.
     // Up/down come from both keyboard arrows and mouse wheel (?1007h alternate scroll mode).
@@ -460,7 +471,7 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
 
     if (busy || showPicker || showApiKeyPrompt) return;
 
-// ctrl+t: toggle thinking blocks expanded/collapsed
+    // ctrl+t: toggle thinking blocks expanded/collapsed
     if (key.ctrl && typed === "t") {
       setThinkingExpanded((v) => !v);
       return;
@@ -470,47 +481,17 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
       setToolsExpanded((v) => !v);
       return;
     }
-
-    // ctrl+p / ctrl+n — input history navigation (readline-style)
-    if (key.ctrl && typed === "p") {
-      if (inputHistory.length === 0) return;
-      if (historyIdx === null) {
-        setDraft(input);
-        const idx = inputHistory.length - 1;
-        setHistoryIdx(idx);
-        setInput(inputHistory[idx] ?? "");
-      } else {
-        const idx = Math.max(0, historyIdx - 1);
-        setHistoryIdx(idx);
-        setInput(inputHistory[idx] ?? "");
-      }
-      return;
-    }
-
-    if (key.ctrl && typed === "n") {
-      if (historyIdx === null) return;
-      const idx = historyIdx + 1;
-      if (idx >= inputHistory.length) {
-        setHistoryIdx(null);
-        setInput(draft);
-      } else {
-        setHistoryIdx(idx);
-        setInput(inputHistory[idx] ?? "");
-      }
-      return;
-    }
   });
 
   //  submit handler 
 
   const handleSubmit = useCallback(
     async (value: string) => {
+      // Composer already resolved autocomplete and cleared its own state before calling us.
+      // value is already trimmed and resolved.
       const typed = value.trim();
       const pasted = pastedContent; // capture before clearing
       const images = pendingImages.slice(); // capture current images
-      setInput("");
-      setHistoryIdx(null);
-      setDraft("");
       setPendingImages([]);
       setPastedContent(null);
 
@@ -521,17 +502,6 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
           : typed
           ? typed + "\n\n" + pasted
           : pasted;
-
-      // Autocomplete partial slash commands on Enter: /ex → /exit, /lo → /loop, etc.
-      if (trimmed.startsWith("/")) {
-        const isExact = SLASH_COMMANDS.includes(trimmed)
-          || trimmed.startsWith("/backend ")
-          || trimmed.startsWith("/loop ");
-        if (!isExact) {
-          const firstMatch = SLASH_COMMANDS.find((cmd) => cmd.startsWith(trimmed));
-          if (firstMatch) trimmed = firstMatch;
-        }
-      }
 
       if (!trimmed && images.length === 0) return;
 
@@ -577,9 +547,11 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
 
       if (trimmed === "/clear") {
         histRef.current.clear();
+        claudeSessionIdRef.current = null;
         const s = sessionRef.current;
         if (s) {
           s.turns = [];
+          s.claudeSessionId = undefined;
           s.updatedAt = new Date().toISOString();
           saveSession(s);
         }
@@ -759,6 +731,8 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
         addCompleted({ id: makeId("user"), role: "user", content: trimmed });
 
         const loop = activeLoop;
+        const loopAbortController = new AbortController();
+        abortControllerRef.current = loopAbortController;
         try {
           await runLoopTui(loop, trimmed, runtimeConfig, {
             onMessage: (text) => {
@@ -773,12 +747,32 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
                 loopInputResolverRef.current = resolve;
               });
             },
-          });
+            onStepStart: (_stepId, stepLabel, stepType) => {
+              if (loopTokenAccRef.current.trim()) {
+                addCompleted({ id: makeId("asst"), role: "assistant", content: loopTokenAccRef.current });
+                snapToBottom();
+              }
+              stepLabelRef.current = `${stepLabel} (${stepType})`;
+              loopTokenAccRef.current = "";
+              liveRef.current = "";
+            },
+            onToken: (text) => {
+              loopTokenAccRef.current += text;
+              liveRef.current = loopTokenAccRef.current;
+            },
+          }, loopAbortController.signal);
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           addCompleted({ id: makeId("sys"), role: "system", content: `Loop error: ${msg}` });
         } finally {
+          abortControllerRef.current = null;
           loopInputResolverRef.current = null;
+          if (loopTokenAccRef.current.trim()) {
+            addCompleted({ id: makeId("asst"), role: "assistant", content: loopTokenAccRef.current });
+            snapToBottom();
+          }
+          loopTokenAccRef.current = "";
+          stepLabelRef.current = "";
           setBusy(false);
           snapToBottom();
         }
@@ -796,7 +790,7 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
 
       setBusy(true);
       liveRef.current = "";
-      setActiveTool(null);
+      activeToolRef.current = null;
       // Snap to bottom and add user message immediately.
       snapToBottom();
       addCompleted({ id: makeId("user"), role: "user", content: trimmed, images: images.length > 0 ? images : undefined });
@@ -868,12 +862,24 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
         });
       }
 
+      // Claude CLI resume: only applicable when using Claude CLI (not images, not other backends).
+      // When active, Claude already has the full conversation, so history injection is skipped.
+      const shouldResumeClaude =
+        assistantBackend === "claude" &&
+        images.length === 0 &&
+        claudeSessionIdRef.current !== null;
+
+      // Skip history injection when we have a Claude session — the session already contains it.
       const enriched = buildEnrichedPrompt(
         trimmed,
         alwaysMemories,
         semanticHits,
-        histRef.current
+        histRef.current,
+        !shouldResumeClaude
       );
+
+      // Computed here so the finally block can check willReview without toggling busy.
+      const allInjectedMemories = [...alwaysMemories, ...semanticHits];
 
       let fullResponse = "";
       let cancelled = false;
@@ -882,6 +888,8 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
       let pendingThinkingText = "";
       // Hold tool calls until we have the result (then emit as one message).
       const pendingToolCalls = new Map<string, { name: string; inputJson: string; startedAt: number }>();
+      // Accumulate completed tool calls for the reviewer (so it can treat them as verification evidence).
+      const completedToolCalls: string[] = [];
       thinkingRef.current = { chars: 0, text: "" };
 
       /** Flush the current thinking block to completed and reset live tracking. */
@@ -898,7 +906,17 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
         const currentKey = runtimeConfig.anthropicApiKey || process.env.ANTHROPIC_API_KEY;
         if (currentKey) setRiteApiKey(currentKey);
         const backendFn = getBackend(assistantBackend);
-        for await (const event of backendFn(enriched, abortController.signal, images.length > 0 ? images : undefined)) {
+        for await (const event of backendFn(enriched, abortController.signal, images.length > 0 ? images : undefined, { resumeSessionId: shouldResumeClaude ? (claudeSessionIdRef.current ?? undefined) : undefined })) {
+          if (event.type === "session_id") {
+            claudeSessionIdRef.current = event.sessionId;
+            // Persist so the session can be resumed across rite restarts.
+            const s = sessionRef.current;
+            if (s && assistantBackend === "claude") {
+              s.claudeSessionId = event.sessionId;
+              saveSession(s);
+            }
+            continue;
+          }
           if (event.type === "text") {
             flushThinking();
             fullResponse += event.content;
@@ -910,7 +928,7 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
           } else if (event.type === "tool_call") {
             flushThinking();
             pendingToolCalls.set(event.id, { name: event.name, inputJson: "", startedAt: Date.now() });
-            setActiveTool(event.name);
+            activeToolRef.current = event.name;
           } else if (event.type === "tool_done") {
             const pending = pendingToolCalls.get(event.id);
             if (pending) pending.inputJson = event.inputJson ?? "";
@@ -930,9 +948,11 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
                 toolIsError: event.isError,
                 durationMs: Date.now() - pending.startedAt,
               });
+              const resultSnippet = (event.result ?? "").slice(0, 300);
+              completedToolCalls.push(`[${pending.name}(${pending.inputJson.slice(0, 200)}) → ${resultSnippet}]`);
             }
             // Clear activeTool only when all pending tools have finished.
-            if (pendingToolCalls.size === 0) setActiveTool(null);
+            if (pendingToolCalls.size === 0) activeToolRef.current = null;
           }
         }
 
@@ -1035,11 +1055,131 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
           });
         }
         pendingToolCalls.clear();
-        setBusy(false);
-        setStreamContent("");
-        liveRef.current = "";
-        setActiveTool(null);
+        activeToolRef.current = null;
         if (pendingMsg) addCompleted(pendingMsg);
+
+        const willReview = !activeLoop && !cancelled && fullResponse.trim() && allInjectedMemories.length > 0;
+        if (willReview) {
+          stepLabelRef.current = "review (compliance)";
+          liveRef.current = "checking response against memory guidelines…";
+          setStreamingState({
+            content: "checking response against memory guidelines…",
+            activeTool: null,
+            stepLabel: "review (compliance)",
+            thinkingText: "",
+            thinkingChars: 0,
+          });
+        } else {
+          liveRef.current = "";
+          stepLabelRef.current = "";
+          setStreamingState(null);
+          setBusy(false);
+        }
+      }
+
+      // Default system loop: silent memory compliance review after every normal response.
+      // Runs whenever memories were injected and no named loop is active.
+      if (!activeLoop && !cancelled && fullResponse.trim() && allInjectedMemories.length > 0) {
+        // busy is already true and loopStepLabel is already set from the finally block above
+        let lastResponse = fullResponse;
+
+        for (let attempt = 0; attempt < 3; attempt++) {
+          let review: { passed: boolean; feedback: string };
+          try {
+            const toolSummary = completedToolCalls.length > 0 ? completedToolCalls.join("\n") : undefined;
+            review = await checkMemoryCompliance(lastResponse, allInjectedMemories, runtimeConfig, toolSummary);
+          } catch {
+            break;
+          }
+
+          if (review.passed) break;
+
+          // Commit reviewer findings as a permanent chat message so the user can see the assessment.
+          addCompleted({
+            id: makeId("sys"),
+            role: "system",
+            content: `→ review (compliance)\n\nPlease revise your previous response to correctly follow these memory guidelines:\n\n${review.feedback}\n\nProvide the corrected response only.`,
+          });
+
+          if (attempt === 2) {
+            addCompleted({
+              id: makeId("sys"),
+              role: "system",
+              content: `Memory compliance unresolved after 3 attempts.\n\nPersistent issues:\n${review.feedback}`,
+            });
+            break;
+          }
+
+          // Correction turn: injected into history but not shown as a user message.
+          stepLabelRef.current = `correction ${attempt + 1} (llm)`;
+          liveRef.current = "";
+          setStreamingState({ content: "", activeTool: null, stepLabel: stepLabelRef.current, thinkingText: "", thinkingChars: 0 });
+          const correctionMsg = `Please revise your previous response to correctly follow these memory guidelines:\n\n${review.feedback}\n\nProvide the corrected response only.`;
+          // Reuse shouldResumeClaude: if we have a live Claude session, skip injecting
+          // history (Claude already has it) and resume the same session thread.
+          const correctionEnriched = buildEnrichedPrompt(
+            correctionMsg,
+            alwaysMemories,
+            semanticHits,
+            histRef.current,
+            !shouldResumeClaude
+          );
+
+          // Reset tool accumulator so the reviewer sees THIS correction turn's evidence, not the original turn's.
+          completedToolCalls.length = 0;
+          const correctionPendingTools = new Map<string, { name: string; inputJson: string; startedAt: number }>();
+          let correctedResponse = "";
+          try {
+            for await (const event of getBackend(assistantBackend)(
+              correctionEnriched,
+              new AbortController().signal,
+              undefined,
+              { resumeSessionId: shouldResumeClaude ? (claudeSessionIdRef.current ?? undefined) : undefined }
+            )) {
+              if (event.type === "session_id") {
+                claudeSessionIdRef.current = event.sessionId;
+                const s = sessionRef.current;
+                if (s && assistantBackend === "claude") {
+                  s.claudeSessionId = event.sessionId;
+                  saveSession(s);
+                }
+              } else if (event.type === "text") {
+                correctedResponse += event.content;
+                liveRef.current = correctedResponse;
+              } else if (event.type === "tool_call") {
+                correctionPendingTools.set(event.id, { name: event.name, inputJson: "", startedAt: Date.now() });
+              } else if (event.type === "tool_done") {
+                const p = correctionPendingTools.get(event.id);
+                if (p) p.inputJson = event.inputJson ?? "";
+              } else if (event.type === "tool_result") {
+                const p = correctionPendingTools.get(event.id);
+                if (p) {
+                  correctionPendingTools.delete(event.id);
+                  const snippet = (event.result ?? "").slice(0, 300);
+                  completedToolCalls.push(`[${p.name}(${p.inputJson.slice(0, 200)}) → ${snippet}]`);
+                }
+              }
+            }
+          } catch {
+            break;
+          }
+
+          if (!correctedResponse.trim()) break;
+
+          histRef.current.add("user", correctionMsg);
+          histRef.current.add("assistant", correctedResponse);
+          liveRef.current = "";
+          addCompleted({ id: makeId("asst"), role: "assistant", content: correctedResponse });
+          lastResponse = correctedResponse;
+          stepLabelRef.current = "review (compliance)";
+          liveRef.current = "checking corrected response…";
+          setStreamingState({ content: "checking corrected response…", activeTool: null, stepLabel: "review (compliance)", thinkingText: "", thinkingChars: 0 });
+        }
+
+        stepLabelRef.current = "";
+        liveRef.current = "";
+        setStreamingState(null);
+        setBusy(false);
       }
     },
     [
@@ -1062,8 +1202,7 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
   handleSubmitRef.current = handleSubmit;
   const onSubmitStable = useCallback((v: string) => { void handleSubmitRef.current(v); }, []);
 
-  // Stable onChange for Composer — avoids recreating on every render
-  const onChangeStable = useCallback((v: string) => { setInput(v); setHistoryIdx(null); }, []);
+  const onMetricsChangeStable = useCallback((m: ComposerMetrics) => { setComposerMetrics(m); }, []);
 
   //  render prep (must be before early returns — hooks can't come after conditional returns)
 
@@ -1081,64 +1220,54 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
     }
   }, [sessionLabel]);
 
-  const thinkingSummary =
-    thinkingChars > 0 && streamContent
-      ? `reasoned for ${(thinkingChars / 1000).toFixed(1)}k chars`
-      : null;
-
-  // Limit the live streaming preview to a fixed number of lines so the dynamic
-  // area never grows unboundedly — a growing live area means Ink erases more lines
-  // each re-render, causing the terminal cursor to jump further up and fighting
-  // the user's scroll position (the "snap" bug).
-  const LIVE_PREVIEW_LINES = 12;
-  const streamPreview = (() => {
-    if (!streamContent) return "";
-    const lines = streamContent.split("\n");
-    if (lines.length <= LIVE_PREVIEW_LINES) return streamContent;
-    return lines.slice(-LIVE_PREVIEW_LINES).join("\n");
-  })();
-
-  const hasLiveArea = isWorking;
-
-  // Compute composer height from actual wrapping math so the total layout never exceeds
-  // termRows-1 (which would cause Ink to switch from eraseLines to clearTerminal/flicker).
+  // Compute composer height using metrics emitted by Composer (only when layout changes).
   // Hints box has paddingX={2} → content width = termCols-4.
-  // Input box has paddingX={1} + border(2) + "> " prefix(3) → text width = termCols-7.
-  const hintsText = isWorking
-    ? (input.trim() ? "enter queue  esc cancel  ctrl+c exit" : "esc cancel  ctrl+c exit")
-    : "enter send  tab autocomplete  up/down history  ctrl+c exit  /help /clear /memory /backend /resume";
+  // Always use the longest hints text for height estimation so the layout doesn't jump
+  // when isWorking flips (Composer renders shorter hints when busy, but we reserve max space).
   const hintsContentWidth = Math.max(20, termCols - 4);
-  const hintsLines = Math.ceil(hintsText.length / hintsContentWidth);
-  const inputContentWidth = Math.max(10, termCols - 7);
-  const inputLines = Math.max(1, Math.ceil((input.length + 1) / inputContentWidth));
+  const hintsLines = Math.ceil(
+    "enter send  tab autocomplete  ctrl+p/n history  ctrl+c exit  /help /clear /memory /backend /resume".length /
+    hintsContentWidth
+  );
   const composerHeight = 1 // status bar
     + 1 // top border
-    + inputLines // input row (grows when text wraps)
+    + composerMetrics.inputLines // input row (grows when text wraps)
     + 1 // bottom border
-    + (autocompleteSuggestions.length > 0 ? 1 : 0)
+    + (composerMetrics.hasAutocomplete ? 1 : 0)
     + (pastedContent ? 1 : 0)
     + (pendingImages.length > 0 ? 1 : 0)
     + (queuedCount > 0 ? 1 : 0)
     + hintsLines
     + 1; // safety margin
 
-  // Live area height when busy
-  const liveAreaHeight = hasLiveArea ? (() => {
-    let h = 2; // "Rite" header + marginBottom
-    if (thinkingPreview && !streamPreview) h += Math.min(LIVE_PREVIEW_LINES, thinkingPreview.split("\n").length);
-    if (thinkingSummary) h += 1;
-    if (activeTool) h += 1;
-    if (streamPreview) h += streamPreview.split("\n").length;
-    if (!streamPreview && !thinkingPreview && !activeTool) h += 1; // fallback spinner
-    return h + 2; // safety margin
-  })() : 0;
-
   // Always reserve 1 line for scroll indicator to prevent layout jump when it shows/hides
   const SCROLL_INDICATOR_HEIGHT = 1;
   // Use termRows-1 so outputHeight < stdout.rows — keeps Ink on the eraseLines
   // path instead of clearTerminal (\x1b[2J), which blanks the screen and flickers.
-  const msgAreaHeight = Math.max(3, termRows - composerHeight - liveAreaHeight - SCROLL_INDICATOR_HEIGHT - 1);
+  const msgAreaHeight = Math.max(3, termRows - composerHeight - SCROLL_INDICATOR_HEIGHT - 1);
   msgAreaHeightRef.current = msgAreaHeight;
+
+  // When msgAreaHeight changes (live area collapses/expands, terminal resize), the
+  // viewport grows/shrinks but ink-scroll-view only clamps scroll offset on content-
+  // height changes — not on viewport-height changes. A stale offset that exceeds the
+  // new getBottomOffset() causes the ↓ handler to jump to 0 (top) instead of bottom,
+  // leaving messages at the top with blank space below. Reconcile after every render.
+  const prevMsgAreaHeightRef = useRef(0);
+  useEffect(() => {
+    if (prevMsgAreaHeightRef.current !== 0 && prevMsgAreaHeightRef.current !== msgAreaHeight) {
+      setTimeout(() => {
+        const ref = scrollRef.current;
+        if (!ref) return;
+        const bottom = ref.getBottomOffset();
+        const current = ref.getScrollOffset();
+        if (current > bottom) {
+          ref.scrollTo(bottom);
+          atBottomRef.current = true;
+        }
+      }, 0);
+    }
+    prevMsgAreaHeightRef.current = msgAreaHeight;
+  });
 
   // Logo shown at startup until the first message arrives
   const showLogo = completed.length === 0 && !isWorking;
@@ -1146,6 +1275,7 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
   // Track scroll position for scroll indicator via onScroll callback
   const [scrolledUp, setScrolledUp] = useState(false);
   const handleScroll = useCallback((offset: number) => {
+    scrollOffsetRef.current = offset;
     const bottom = scrollRef.current?.getBottomOffset() ?? 0;
     atBottomRef.current = offset >= bottom;
     setScrolledUp(offset > 0);
@@ -1203,6 +1333,8 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
         onSelect={(resumed) => {
           setShowPicker(false);
           sessionRef.current = resumed;
+          // Restore the Claude session ID so the next turn resumes the right thread.
+          claudeSessionIdRef.current = resumed.claudeSessionId ?? null;
           setAssistantBackend(resumed.backend);
           setRuntimeConfig((c) => ({ ...c, backend: resumed.backend }));
           histRef.current.clear();
@@ -1243,28 +1375,56 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
         onContentHeightChange={handleContentHeightChange}
       >
         {showLogo && <Logo />}
-        {(completed.length > RENDERED_MSG_CAP ? completed.slice(-RENDERED_MSG_CAP) : completed).map((msg) => (
-          <MessageBubble key={msg.id} message={msg} thinkingExpanded={thinkingExpanded} toolsExpanded={toolsExpanded} />
-        ))}
+        {(() => {
+          const msgs = completed.length > RENDERED_MSG_CAP ? completed.slice(-RENDERED_MSG_CAP) : completed;
+          const heights = msgHeightsRef.current;
+          const allMeasured = msgs.length > 0 && msgs.every((m) => heights.has(m.id));
+
+          if (!allMeasured) {
+            return msgs.map((msg) => (
+              <MeasuredBubble key={msg.id} message={msg} thinkingExpanded={thinkingExpanded} toolsExpanded={toolsExpanded} onMeasure={handleMeasure} />
+            ));
+          }
+
+          const scrollOffset = scrollOffsetRef.current;
+          const overscan = msgAreaHeight * 2;
+          const windowTop = Math.max(0, scrollOffset - overscan);
+          const windowBottom = scrollOffset + msgAreaHeight + overscan;
+
+          let topSpacerH = 0;
+          let bottomSpacerH = 0;
+          const windowedMsgs: Message[] = [];
+          let cumTop = 0;
+
+          for (const msg of msgs) {
+            const h = heights.get(msg.id)!;
+            if (cumTop + h <= windowTop) {
+              topSpacerH += h;
+            } else if (cumTop >= windowBottom) {
+              bottomSpacerH += h;
+            } else {
+              windowedMsgs.push(msg);
+            }
+            cumTop += h;
+          }
+
+          return (
+            <>
+              {topSpacerH > 0 && <Box height={topSpacerH} />}
+              {windowedMsgs.map((msg) => (
+                <MeasuredBubble key={msg.id} message={msg} thinkingExpanded={thinkingExpanded} toolsExpanded={toolsExpanded} onMeasure={handleMeasure} />
+              ))}
+              {bottomSpacerH > 0 && <Box height={bottomSpacerH} />}
+            </>
+          );
+        })()}
+        {streamingState && <StreamingBubble state={streamingState} />}
       </ScrollView>
 
-      {/*  Live area — isolated component; spinner ticks don't re-render Repl  */}
-      {hasLiveArea && (
-        <LiveArea
-          activeTool={activeTool}
-          streamPreview={streamPreview}
-          thinkingPreview={thinkingPreview}
-          thinkingSummary={thinkingSummary}
-          previewLines={LIVE_PREVIEW_LINES}
-        />
-      )}
-
-      {/*  Composer — pinned to bottom  */}
+      {/*  Composer — pinned to bottom; owns input state so keystrokes don't re-render Repl  */}
       <Composer
-        value={input}
-        onChange={onChangeStable}
+        ref={composerRef}
         onSubmit={onSubmitStable}
-        onTab={handleTab}
         busy={isWorking}
         backend={assistantBackend}
         utilityBackend={runtimeConfig.utilityBackend}
@@ -1273,9 +1433,11 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
         session={sessionLabel}
         pendingImageCount={pendingImages.length}
         pastedContent={pastedContent}
-        onClearPaste={() => setPastedContent(null)}
         queuedCount={queuedCount}
-        autocompleteSuggestions={autocompleteSuggestions}
+        inputHistory={inputHistory}
+        termCols={termCols}
+        autocompleteActiveRef={autocompleteActiveRef}
+        onMetricsChange={onMetricsChangeStable}
       />
     </Box>
   );

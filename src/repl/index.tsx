@@ -869,14 +869,10 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
         images.length === 0 &&
         claudeSessionIdRef.current !== null;
 
-      // Skip history injection when we have a Claude session — the session already contains it.
-      const enriched = buildEnrichedPrompt(
-        trimmed,
-        alwaysMemories,
-        semanticHits,
-        histRef.current,
-        !shouldResumeClaude
-      );
+      // When resuming a Claude session, the session already holds full context — send only the raw message.
+      const enriched = shouldResumeClaude
+        ? trimmed
+        : buildEnrichedPrompt(trimmed, alwaysMemories, semanticHits, histRef.current, true);
 
       // Computed here so the finally block can check willReview without toggling busy.
       const allInjectedMemories = [...alwaysMemories, ...semanticHits];
@@ -1117,13 +1113,9 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
           const correctionMsg = `Please revise your previous response to correctly follow these memory guidelines:\n\n${review.feedback}\n\nProvide the corrected response only.`;
           // Reuse shouldResumeClaude: if we have a live Claude session, skip injecting
           // history (Claude already has it) and resume the same session thread.
-          const correctionEnriched = buildEnrichedPrompt(
-            correctionMsg,
-            alwaysMemories,
-            semanticHits,
-            histRef.current,
-            !shouldResumeClaude
-          );
+          const correctionEnriched = shouldResumeClaude
+            ? correctionMsg
+            : buildEnrichedPrompt(correctionMsg, alwaysMemories, semanticHits, histRef.current, true);
 
           // Reset tool accumulator so the reviewer sees THIS correction turn's evidence, not the original turn's.
           completedToolCalls.length = 0;

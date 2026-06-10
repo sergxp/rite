@@ -70,7 +70,7 @@ export async function callClaudeCliBlocking(
   prompt: string,
   options?: { systemPrompt?: string; model?: string; noHooks?: boolean }
 ): Promise<string> {
-  const args = ["--print", "--output-format", "text", "--dangerously-skip-permissions"];
+  const args = ["--print", "--output-format", "text", "--dangerously-skip-permissions", "--no-session-persistence"];
   if (options?.model) {
     args.push("--model", options.model);
   }

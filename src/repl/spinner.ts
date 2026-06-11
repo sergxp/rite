@@ -38,3 +38,14 @@ export function useSpinnerFrame(): number {
 
   return f;
 }
+
+// Subscribe a raw callback to every tick. Fires in the same synchronous loop as
+// useSpinnerFrame setters, so React 18 batches all updates into one render commit.
+export function subscribeTick(cb: (frame: number) => void): () => void {
+  subscribers.add(cb);
+  if (subscribers.size === 1) start();
+  return () => {
+    subscribers.delete(cb);
+    if (subscribers.size === 0) stop();
+  };
+}

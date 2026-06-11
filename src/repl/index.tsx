@@ -5,7 +5,7 @@ import { ConversationHistory } from "./history.js";
 import { buildEnrichedPrompt } from "./enricher.js";
 import { loadMemories } from "../memory/reader.js";
 import { semanticSearch } from "../memory/embeddings.js";
-import { getBackend } from "../backends/index.js";
+import { getBackend, type BackendEvent } from "../backends/index.js";
 import { extractMemories } from "../extraction/extractor.js";
 import { compressHistoryIfNeeded } from "../history/compressor.js";
 import {
@@ -17,6 +17,7 @@ import {
 import { autoNameSession } from "../sessions/namer.js";
 import { SessionPicker } from "../sessions/picker.js";
 import { appendAuditEvent } from "../audit/writer.js";
+import { subscribeTick } from "./spinner.js";
 import { Composer, type ComposerHandle, type ComposerMetrics } from "./composer.js";
 import { MessageBubble, type Message, type MessageRole } from "./message.js";
 import { MarkdownMessage } from "./markdown.js";
@@ -34,7 +35,7 @@ import { Logo, LOGO_HEIGHT } from "./logo.js";
 import { LoopPicker } from "./loop-picker.js";
 import { loadLoops } from "../loops/registry.js";
 import { runLoopTui } from "../loops/runner.js";
-import { checkMemoryCompliance } from "../loops/default-review.js";
+import { checkMemoryCompliance, TOOL_EVIDENCE_HEADER } from "../loops/default-review.js";
 import type { BackendName, RiteConfig } from "../config/types.js";
 import type { MemoryFile } from "../memory/types.js";
 import type { Session } from "../sessions/types.js";
@@ -95,7 +96,39 @@ interface StreamingState {
   thinkingChars: number;
 }
 
-function StreamingBubble({ state }: { state: StreamingState }) {
+function StreamingBubble({
+  liveRef,
+  activeToolRef,
+  stepLabelRef,
+  thinkingRef,
+}: {
+  liveRef: React.MutableRefObject<string>;
+  activeToolRef: React.MutableRefObject<string | null>;
+  stepLabelRef: React.MutableRefObject<string>;
+  thinkingRef: React.MutableRefObject<{ chars: number; text: string }>;
+}) {
+  const [state, setState] = useState<StreamingState>(() => ({
+    content: liveRef.current,
+    activeTool: activeToolRef.current,
+    stepLabel: stepLabelRef.current,
+    thinkingText: thinkingRef.current.text,
+    thinkingChars: thinkingRef.current.chars,
+  }));
+
+  // Subscribe to the same timer tick as the Composer spinner. Both setState calls
+  // fire in the same synchronous loop → React 18 batches → 1 render commit per tick.
+  useEffect(() => {
+    return subscribeTick(() => {
+      setState({
+        content: liveRef.current,
+        activeTool: activeToolRef.current,
+        stepLabel: stepLabelRef.current,
+        thinkingText: thinkingRef.current.text,
+        thinkingChars: thinkingRef.current.chars,
+      });
+    });
+  }, [liveRef, activeToolRef, stepLabelRef, thinkingRef]);
+
   const thinkingSummary =
     state.thinkingChars > 0 && state.content
       ? `reasoned for ${(state.thinkingChars / 1000).toFixed(1)}k chars`
@@ -155,6 +188,64 @@ const MeasuredBubble = React.memo(function MeasuredBubble({
   );
 });
 
+type PendingTool = { name: string; inputJson: string; startedAt: number };
+
+/**
+ * Drains a backend event stream, updating shared UI refs and accumulating tool evidence.
+ * Accepts optional callbacks for the behaviours that differ between the main turn and
+ * correction turns: flushing thinking to completed (onPreText), accumulating raw thinking
+ * text (onThinkingDelta), and emitting tool-call UI bubbles (onToolResult).
+ * Returns the accumulated text response.
+ */
+async function drainAgentStream(
+  stream: AsyncIterable<BackendEvent>,
+  opts: {
+    pendingTools: Map<string, PendingTool>;
+    completedToolCalls: string[];
+    activeToolRef: { current: string | null };
+    thinkingRef: { current: { chars: number; text: string } };
+    liveRef: { current: string };
+    onSessionId(id: string): void;
+    onPreText?(): void;
+    onThinkingDelta?(delta: string): void;
+    onToolResult?(tool: PendingTool, result: string, isError: boolean): void;
+  }
+): Promise<string> {
+  let accumulated = "";
+  let accumulatedThinking = "";
+  for await (const event of stream) {
+    if (event.type === "session_id") {
+      opts.onSessionId(event.sessionId);
+    } else if (event.type === "text") {
+      opts.onPreText?.();
+      accumulated += event.content;
+      opts.liveRef.current = accumulated;
+    } else if (event.type === "thinking") {
+      accumulatedThinking += event.content;
+      opts.thinkingRef.current.chars += event.content.length;
+      opts.thinkingRef.current.text = accumulatedThinking;
+      opts.onThinkingDelta?.(event.content);
+    } else if (event.type === "tool_call") {
+      opts.onPreText?.();
+      opts.pendingTools.set(event.id, { name: event.name, inputJson: "", startedAt: Date.now() });
+      opts.activeToolRef.current = event.name;
+    } else if (event.type === "tool_done") {
+      const p = opts.pendingTools.get(event.id);
+      if (p) p.inputJson = event.inputJson ?? "";
+    } else if (event.type === "tool_result") {
+      const p = opts.pendingTools.get(event.id);
+      if (p) {
+        opts.pendingTools.delete(event.id);
+        const snippet = (event.result ?? "").slice(0, 300);
+        opts.completedToolCalls.push(`[${p.name}(${p.inputJson.slice(0, 200)}) → ${snippet}]`);
+        opts.onToolResult?.(p, event.result ?? "", event.isError);
+      }
+      if (opts.pendingTools.size === 0) opts.activeToolRef.current = null;
+    }
+  }
+  return accumulated;
+}
+
 function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
   const { exit } = useApp();
 
@@ -181,7 +272,6 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
   const msgAreaHeightRef = useRef(10);
 
 
-  const [streamingState, setStreamingState] = useState<StreamingState | null>(null);
   const [busy, setBusy] = useState(false);
   // Global visibility toggles for thinking blocks and tool results (ctrl+t / ctrl+o)
   const [thinkingExpanded, setThinkingExpanded] = useState(false);
@@ -253,32 +343,22 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
   const messageQueueRef = useRef<string[]>([]);
   const [queuedCount, setQueuedCount] = useState(0);
 
-  //  streaming poll — bundles all live state into one setStreamingState call per tick
-
+  // Clear streaming refs when idle so stale content doesn't flash on next request.
   useEffect(() => {
     if (!busy && !embeddingBusy) {
       liveRef.current = "";
       thinkingRef.current = { chars: 0, text: "" };
       activeToolRef.current = null;
       stepLabelRef.current = "";
-      setStreamingState(null);
-      return;
     }
-    const t = setInterval(() => {
-      setStreamingState({
-        content: liveRef.current,
-        activeTool: activeToolRef.current,
-        stepLabel: stepLabelRef.current,
-        thinkingText: thinkingRef.current.text,
-        thinkingChars: thinkingRef.current.chars,
-      });
-    }, 80);
-    return () => clearInterval(t);
   }, [busy, embeddingBusy]);
 
   // Scroll to bottom imperatively (used after session load, sending message, etc.)
+  // Eagerly update scrollOffsetRef so windowing uses the correct offset on the very
+  // next render — before the async onScroll callback has a chance to fire.
   const snapToBottom = useCallback(() => {
     atBottomRef.current = true;
+    scrollOffsetRef.current = scrollRef.current?.getBottomOffset() ?? scrollOffsetRef.current;
     scrollRef.current?.scrollToBottom();
   }, []);
 
@@ -328,6 +408,8 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
           { id: makeId("sys"), role: "system", content: `Resumed: ${resumed.name ?? resumed.id}` },
           ...turns,
         ]);
+        // Defer snapToBottom until after Yoga has measured the restored messages.
+        setTimeout(() => snapToBottom(), 0);
       } catch {
         const s = createSession(config, "repl");
         sessionRef.current = s;
@@ -869,10 +951,16 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
         images.length === 0 &&
         claudeSessionIdRef.current !== null;
 
-      // When resuming a Claude session, the session already holds full context — send only the raw message.
-      const enriched = shouldResumeClaude
-        ? trimmed
-        : buildEnrichedPrompt(trimmed, alwaysMemories, semanticHits, histRef.current, true);
+      // When resuming a Claude session, history and always-memories are already in session context.
+      // Re-inject semantic hits when they matched the current message — they are per-message relevance
+      // matches and may differ from what was relevant on turn 1.
+      const enriched = buildEnrichedPrompt(
+        trimmed,
+        shouldResumeClaude ? [] : alwaysMemories,
+        semanticHits,
+        histRef.current,
+        !shouldResumeClaude,
+      );
 
       // Computed here so the finally block can check willReview without toggling busy.
       const allInjectedMemories = [...alwaysMemories, ...semanticHits];
@@ -896,61 +984,49 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
         thinkingRef.current = { chars: 0, text: "" };
       };
 
+      // Shared session-ID handler used by both main and correction turns.
+      const handleSessionId = (id: string) => {
+        claudeSessionIdRef.current = id;
+        const s = sessionRef.current;
+        if (s && assistantBackend === "claude") {
+          s.claudeSessionId = id;
+          saveSession(s);
+        }
+      };
+
       try {
         // Refresh the module-level API key on every call so vision works even if
         // the mount-time useEffect fired before config was available.
         const currentKey = runtimeConfig.anthropicApiKey || process.env.ANTHROPIC_API_KEY;
         if (currentKey) setRiteApiKey(currentKey);
         const backendFn = getBackend(assistantBackend);
-        for await (const event of backendFn(enriched, abortController.signal, images.length > 0 ? images : undefined, { resumeSessionId: shouldResumeClaude ? (claudeSessionIdRef.current ?? undefined) : undefined })) {
-          if (event.type === "session_id") {
-            claudeSessionIdRef.current = event.sessionId;
-            // Persist so the session can be resumed across rite restarts.
-            const s = sessionRef.current;
-            if (s && assistantBackend === "claude") {
-              s.claudeSessionId = event.sessionId;
-              saveSession(s);
-            }
-            continue;
-          }
-          if (event.type === "text") {
-            flushThinking();
-            fullResponse += event.content;
-            liveRef.current = fullResponse;
-          } else if (event.type === "thinking") {
-            pendingThinkingText += event.content;
-            thinkingRef.current.chars += event.content.length;
-            thinkingRef.current.text = pendingThinkingText;
-          } else if (event.type === "tool_call") {
-            flushThinking();
-            pendingToolCalls.set(event.id, { name: event.name, inputJson: "", startedAt: Date.now() });
-            activeToolRef.current = event.name;
-          } else if (event.type === "tool_done") {
-            const pending = pendingToolCalls.get(event.id);
-            if (pending) pending.inputJson = event.inputJson ?? "";
-            // Keep activeTool showing — tool is still executing until tool_result arrives.
-            // Only update if there are multiple concurrent tools (show the most recent remaining one).
-          } else if (event.type === "tool_result") {
-            const pending = pendingToolCalls.get(event.id);
-            if (pending) {
-              pendingToolCalls.delete(event.id);
+        fullResponse = await drainAgentStream(
+          backendFn(enriched, abortController.signal, images.length > 0 ? images : undefined, {
+            resumeSessionId: shouldResumeClaude ? (claudeSessionIdRef.current ?? undefined) : undefined,
+          }),
+          {
+            pendingTools: pendingToolCalls,
+            completedToolCalls,
+            activeToolRef,
+            thinkingRef,
+            liveRef,
+            onSessionId: handleSessionId,
+            onPreText: flushThinking,
+            onThinkingDelta(delta) { pendingThinkingText += delta; },
+            onToolResult(tool, result, isError) {
               addCompleted({
                 id: makeId("tool"),
                 role: "tool_call",
-                content: pending.name,
-                toolName: pending.name,
-                toolInputJson: pending.inputJson,
-                toolResult: event.result,
-                toolIsError: event.isError,
-                durationMs: Date.now() - pending.startedAt,
+                content: tool.name,
+                toolName: tool.name,
+                toolInputJson: tool.inputJson,
+                toolResult: result,
+                toolIsError: isError,
+                durationMs: Date.now() - tool.startedAt,
               });
-              const resultSnippet = (event.result ?? "").slice(0, 300);
-              completedToolCalls.push(`[${pending.name}(${pending.inputJson.slice(0, 200)}) → ${resultSnippet}]`);
-            }
-            // Clear activeTool only when all pending tools have finished.
-            if (pendingToolCalls.size === 0) activeToolRef.current = null;
+            },
           }
-        }
+        );
 
         flushThinking();
 
@@ -1038,7 +1114,6 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
           pendingMsg = { id: makeId("sys"), role: "system", content: `Error: ${msg}` };
         }
       } finally {
-        abortControllerRef.current = null;
         // Flush any tool calls that never received a result (e.g. on abort).
         for (const [, pending] of pendingToolCalls) {
           addCompleted({
@@ -1058,17 +1133,10 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
         if (willReview) {
           stepLabelRef.current = "review (compliance)";
           liveRef.current = "checking response against memory guidelines…";
-          setStreamingState({
-            content: "checking response against memory guidelines…",
-            activeTool: null,
-            stepLabel: "review (compliance)",
-            thinkingText: "",
-            thinkingChars: 0,
-          });
         } else {
           liveRef.current = "";
           stepLabelRef.current = "";
-          setStreamingState(null);
+          abortControllerRef.current = null;
           setBusy(false);
         }
       }
@@ -1080,14 +1148,18 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
         let lastResponse = fullResponse;
 
         for (let attempt = 0; attempt < 3; attempt++) {
+          if (abortController.signal.aborted) break;
           let review: { passed: boolean; feedback: string };
           try {
-            const toolSummary = completedToolCalls.length > 0 ? completedToolCalls.join("\n") : undefined;
-            review = await checkMemoryCompliance(lastResponse, allInjectedMemories, runtimeConfig, toolSummary);
+            const responseWithTools = completedToolCalls.length > 0
+              ? `${lastResponse}\n\n${TOOL_EVIDENCE_HEADER}\n${completedToolCalls.join("\n")}`
+              : lastResponse;
+            review = await checkMemoryCompliance(responseWithTools, allInjectedMemories, runtimeConfig, abortController.signal);
           } catch {
             break;
           }
 
+          if (abortController.signal.aborted) break;
           if (review.passed) break;
 
           // Commit reviewer findings as a permanent chat message so the user can see the assessment.
@@ -1109,49 +1181,40 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
           // Correction turn: injected into history but not shown as a user message.
           stepLabelRef.current = `correction ${attempt + 1} (llm)`;
           liveRef.current = "";
-          setStreamingState({ content: "", activeTool: null, stepLabel: stepLabelRef.current, thinkingText: "", thinkingChars: 0 });
           const correctionMsg = `Please revise your previous response to correctly follow these memory guidelines:\n\n${review.feedback}\n\nProvide the corrected response only.`;
-          // Reuse shouldResumeClaude: if we have a live Claude session, skip injecting
-          // history (Claude already has it) and resume the same session thread.
-          const correctionEnriched = shouldResumeClaude
-            ? correctionMsg
-            : buildEnrichedPrompt(correctionMsg, alwaysMemories, semanticHits, histRef.current, true);
+          // Reuse shouldResumeClaude: history and always-memories already in session context.
+          // Re-inject semantic hits if relevant to the original message (same hits as main turn).
+          const correctionEnriched = buildEnrichedPrompt(
+            correctionMsg,
+            shouldResumeClaude ? [] : alwaysMemories,
+            semanticHits,
+            histRef.current,
+            !shouldResumeClaude,
+          );
 
           // Reset tool accumulator so the reviewer sees THIS correction turn's evidence, not the original turn's.
           completedToolCalls.length = 0;
-          const correctionPendingTools = new Map<string, { name: string; inputJson: string; startedAt: number }>();
+          const correctionPendingTools = new Map<string, PendingTool>();
           let correctedResponse = "";
           try {
-            for await (const event of getBackend(assistantBackend)(
-              correctionEnriched,
-              new AbortController().signal,
-              undefined,
-              { resumeSessionId: shouldResumeClaude ? (claudeSessionIdRef.current ?? undefined) : undefined }
-            )) {
-              if (event.type === "session_id") {
-                claudeSessionIdRef.current = event.sessionId;
-                const s = sessionRef.current;
-                if (s && assistantBackend === "claude") {
-                  s.claudeSessionId = event.sessionId;
-                  saveSession(s);
-                }
-              } else if (event.type === "text") {
-                correctedResponse += event.content;
-                liveRef.current = correctedResponse;
-              } else if (event.type === "tool_call") {
-                correctionPendingTools.set(event.id, { name: event.name, inputJson: "", startedAt: Date.now() });
-              } else if (event.type === "tool_done") {
-                const p = correctionPendingTools.get(event.id);
-                if (p) p.inputJson = event.inputJson ?? "";
-              } else if (event.type === "tool_result") {
-                const p = correctionPendingTools.get(event.id);
-                if (p) {
-                  correctionPendingTools.delete(event.id);
-                  const snippet = (event.result ?? "").slice(0, 300);
-                  completedToolCalls.push(`[${p.name}(${p.inputJson.slice(0, 200)}) → ${snippet}]`);
-                }
+            correctedResponse = await drainAgentStream(
+              getBackend(assistantBackend)(
+                correctionEnriched,
+                abortController.signal,
+                undefined,
+                { resumeSessionId: shouldResumeClaude ? (claudeSessionIdRef.current ?? undefined) : undefined }
+              ),
+              {
+                pendingTools: correctionPendingTools,
+                completedToolCalls,
+                activeToolRef,
+                thinkingRef,
+                liveRef,
+                onSessionId: handleSessionId,
+                // No onPreText: correction turns don't commit thinking blocks to completed.
+                // No onToolResult: correction tool calls are evidence only, not shown as bubbles.
               }
-            }
+            );
           } catch {
             break;
           }
@@ -1165,12 +1228,11 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
           lastResponse = correctedResponse;
           stepLabelRef.current = "review (compliance)";
           liveRef.current = "checking corrected response…";
-          setStreamingState({ content: "checking corrected response…", activeTool: null, stepLabel: "review (compliance)", thinkingText: "", thinkingChars: 0 });
         }
 
         stepLabelRef.current = "";
         liveRef.current = "";
-        setStreamingState(null);
+        abortControllerRef.current = null;
         setBusy(false);
       }
     },
@@ -1271,6 +1333,7 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
     const bottom = scrollRef.current?.getBottomOffset() ?? 0;
     atBottomRef.current = offset >= bottom;
     setScrolledUp(offset > 0);
+    setWindowVersion((v) => v + 1);
   }, []);
 
   // Auto-scroll to bottom when new content is added, if user was already at bottom.
@@ -1278,9 +1341,23 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
   const scrollDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const handleContentHeightChange = useCallback((_height: number) => {
     if (!atBottomRef.current) return;
+    // Eagerly advance scrollOffsetRef so windowing uses the correct window on the
+    // next render — before the debounced scrollToBottom fires. Only advance (never
+    // retreat): retreating would window out currently-visible messages.
+    const ref = scrollRef.current;
+    if (ref) {
+      const newBottom = ref.getBottomOffset();
+      if (newBottom > scrollOffsetRef.current) {
+        scrollOffsetRef.current = newBottom;
+      }
+    }
     if (scrollDebounceRef.current) clearTimeout(scrollDebounceRef.current);
     scrollDebounceRef.current = setTimeout(() => {
-      if (atBottomRef.current) scrollRef.current?.scrollToBottom();
+      const r = scrollRef.current;
+      if (r && atBottomRef.current) {
+        scrollOffsetRef.current = r.getBottomOffset();
+        r.scrollToBottom();
+      }
     }, 200);
   }, []);
 
@@ -1370,13 +1447,6 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
         {(() => {
           const msgs = completed.length > RENDERED_MSG_CAP ? completed.slice(-RENDERED_MSG_CAP) : completed;
           const heights = msgHeightsRef.current;
-          const allMeasured = msgs.length > 0 && msgs.every((m) => heights.has(m.id));
-
-          if (!allMeasured) {
-            return msgs.map((msg) => (
-              <MeasuredBubble key={msg.id} message={msg} thinkingExpanded={thinkingExpanded} toolsExpanded={toolsExpanded} onMeasure={handleMeasure} />
-            ));
-          }
 
           const scrollOffset = scrollOffsetRef.current;
           const overscan = msgAreaHeight * 2;
@@ -1389,7 +1459,13 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
           let cumTop = 0;
 
           for (const msg of msgs) {
-            const h = heights.get(msg.id)!;
+            const h = heights.get(msg.id);
+            if (h === undefined) {
+              // Unmeasured message (newly added) — render it inline so it measures itself.
+              // Never spacer an unmeasured message: we don't know its height yet.
+              windowedMsgs.push(msg);
+              continue;
+            }
             if (cumTop + h <= windowTop) {
               topSpacerH += h;
             } else if (cumTop >= windowBottom) {
@@ -1410,7 +1486,7 @@ function Repl({ backend, historyLimit, config, resumeSessionId }: ReplProps) {
             </>
           );
         })()}
-        {streamingState && <StreamingBubble state={streamingState} />}
+        {isWorking && <StreamingBubble liveRef={liveRef} activeToolRef={activeToolRef} stepLabelRef={stepLabelRef} thinkingRef={thinkingRef} />}
       </ScrollView>
 
       {/*  Composer — pinned to bottom; owns input state so keystrokes don't re-render Repl  */}

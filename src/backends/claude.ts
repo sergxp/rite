@@ -68,7 +68,7 @@ function noHooksSettingsPath(): string {
 
 export async function callClaudeCliBlocking(
   prompt: string,
-  options?: { systemPrompt?: string; model?: string; noHooks?: boolean }
+  options?: { systemPrompt?: string; model?: string; noHooks?: boolean; signal?: AbortSignal }
 ): Promise<string> {
   const args = ["--print", "--output-format", "text", "--dangerously-skip-permissions", "--no-session-persistence"];
   if (options?.model) {
@@ -86,6 +86,7 @@ export async function callClaudeCliBlocking(
       reject: false,
       stdin: "pipe",
       input: prompt,
+      cancelSignal: options?.signal,
     });
     return result.stdout?.trim() ?? "";
   } catch (err) {
@@ -94,7 +95,8 @@ export async function callClaudeCliBlocking(
         "claude binary not found in PATH. Install Claude Code first: https://claude.ai/code"
       );
     }
-    throw err;
+    // Cancelled — return empty string silently.
+    return "";
   }
 }
 

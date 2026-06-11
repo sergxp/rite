@@ -5,6 +5,7 @@ import { callCodexBlocking } from "./codex.js";
 export interface UtilityCallOptions {
   systemPrompt?: string;
   maxTokens?: number;
+  signal?: AbortSignal;
 }
 
 function composeCodexPrompt(prompt: string, systemPrompt?: string): string {
@@ -28,5 +29,6 @@ export async function callUtilityBlocking(
     model: "haiku",
     noHooks: true,
     systemPrompt: options?.systemPrompt,
+    signal: options?.signal,
   });
 }

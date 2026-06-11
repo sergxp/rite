@@ -12,7 +12,7 @@ import type { Session } from "../../sessions/types"
 
 // Height reserved for composer (min 3) and footer (1)
 const FOOTER_HEIGHT = 1
-const COMPOSER_MIN_HEIGHT = 3
+const COMPOSER_MIN_HEIGHT = 3 // 2 borders + 1 input row
 
 export function Session() {
   const route = useRoute()

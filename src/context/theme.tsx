@@ -29,7 +29,7 @@ function makeMarkdownStyle(): SyntaxStyle {
     "markup.strong": { bold: true },
     "markup.italic": { italic: true },
     "markup.strikethrough": { dim: true },
-    "markup.raw": { fg: "yellow" },              // inline code + code fences
+    "markup.raw": { fg: "#5f87af" },             // inline code + code fences
     "markup.link": { fg: "cyan", underline: true },
     "markup.link.label": { fg: "cyan" },
     "markup.link.url": { fg: "cyan", underline: true },

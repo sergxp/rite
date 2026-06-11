@@ -38,7 +38,8 @@ export async function checkMemoryCompliance(
   response: string,
   memories: MemoryFile[],
   config: RiteConfig,
-  signal?: AbortSignal,
+  signal: AbortSignal | undefined,
+  recentTurns: ReadonlyArray<{ role: "user" | "assistant"; content: string }>,
 ): Promise<DefaultReviewResult> {
   if (signal?.aborted) return { passed: true, feedback: "" };
   const faked = fakeReviewVerdict();
@@ -46,16 +47,31 @@ export async function checkMemoryCompliance(
 
   const memoriesText = memories.map((m) => m.content).join("\n\n---\n\n");
 
+  // Include recent conversation turns so the reviewer understands context and
+  // doesn't flag choices that were reasonable given the flow of the exchange.
+  const historySection =
+    recentTurns.length > 0
+      ? [
+          "",
+          "Recent conversation context (for understanding — not being reviewed):",
+          recentTurns
+            .map((t) => `${t.role === "user" ? "User" : "Assistant"}: ${t.content}`)
+            .join("\n\n"),
+        ].join("\n")
+      : ""
+
   const prompt = [
     "You are a behavioral compliance checker for an AI assistant.",
     "Check whether the assistant response followed all BEHAVIORAL guidelines from the memories below.",
     "Only flag violations of explicit rules, instructions, or style guidelines.",
     "Ignore informational memories (facts, references, project context, user descriptions) — those don't require compliance.",
     "If there are no behavioral guidelines in the memories, respond with passed: true.",
+    "Use the conversation context to understand whether the response was appropriate for the situation before flagging it.",
     `IMPORTANT: The response may include a '${TOOL_EVIDENCE_HEADER}' section. Treat those tool calls as verification evidence. If the assistant called Read/Grep/Bash/etc. on a file before making claims about it, the verification requirement is satisfied.`,
     "",
     "Memory content:",
     memoriesText,
+    historySection,
     "",
     "Assistant response to check:",
     response,

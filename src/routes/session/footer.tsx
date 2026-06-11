@@ -1,6 +1,8 @@
-import { createMemo, Show } from "solid-js"
+import { createMemo, createEffect, Show } from "solid-js"
 import { useTheme } from "../../context/theme"
 import { useSessionStore } from "../../context/session-store"
+import { loadMemories } from "../../memory/reader"
+import { DEFAULT_CLAUDE_MODEL } from "../../sessions/store"
 import type { Session } from "../../sessions/types"
 
 interface FooterProps {
@@ -23,6 +25,17 @@ export function Footer(props: FooterProps) {
     const live = store.store.sessions.find((s) => s.id === props.session.id)
     return (live ?? props.session).turns.length
   })
+  const model = createMemo(() => {
+    const live = store.store.sessions.find((s) => s.id === props.session.id)
+    const s = live ?? props.session
+    return s.model ?? (s.backend === "claude" ? DEFAULT_CLAUDE_MODEL : undefined)
+  })
+  const memoryCount = createMemo(() => loadMemories().always.length)
+
+  // Keep the terminal tab title in sync with the session name.
+  createEffect(() => {
+    process.stdout.write(`\x1b]2;${name()}\x07`)
+  })
 
   return (
     <box
@@ -42,7 +55,7 @@ export function Footer(props: FooterProps) {
           <text fg={theme.primary}>● streaming</text>
         </Show>
         <text fg={theme.textDim}>
-          {turnCount()} turns · {props.session.backend}
+          {memoryCount()} {memoryCount() === 1 ? "memory" : "memories"} · {turnCount()} turns · {props.session.backend}{model() ? ` · ${model()}` : ""}
         </text>
         <text fg={theme.textDim}>esc abort · q back</text>
       </box>

@@ -8,6 +8,7 @@ export type BackendEvent =
 
 export interface BackendCallOpts {
   resumeSessionId?: string
+  model?: string
 }
 
 export type BackendFn = (

@@ -49,7 +49,10 @@ export async function callClaudeCliBlocking(
       stdin: "pipe",
       input: prompt,
       cancelSignal: options?.signal,
+      forceKillAfterDelay: 200,
     })
+    // If aborted, return empty regardless of what stdout buffered.
+    if (options?.signal?.aborted) return ""
     return result.stdout?.trim() ?? ""
   } catch (err) {
     if (isEnoent(err)) throw notFoundError()
@@ -73,12 +76,16 @@ export async function* callClaude(
   if (opts?.resumeSessionId) {
     args.push("--resume", opts.resumeSessionId)
   }
+  if (opts?.model) {
+    args.push("--model", opts.model)
+  }
 
   const subprocess = execa("claude", args, {
     reject: false,
     stdin: "pipe",
     input: prompt,
     cancelSignal: signal,
+    forceKillAfterDelay: 200,
   })
 
   if (!subprocess.stdout) {

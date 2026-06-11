@@ -16,19 +16,23 @@ export function makeSessionId(): string {
   return `${stamp}-${suffix}`
 }
 
+export const DEFAULT_CLAUDE_MODEL = "claude-sonnet-4-6"
+
 export const SessionStore = {
   create(opts: { cwd: string; backend?: Session["backend"]; type?: Session["type"] }): Session {
     const now = new Date().toISOString()
+    const backend = opts.backend ?? "claude"
     return {
       id: makeSessionId(),
       name: null,
       createdAt: now,
       updatedAt: now,
       workingDir: opts.cwd,
-      backend: opts.backend ?? "claude",
+      backend,
       type: opts.type ?? "repl",
       turns: [],
       memoriesActive: [],
+      model: backend === "claude" ? DEFAULT_CLAUDE_MODEL : undefined,
     }
   },
 

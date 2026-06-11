@@ -19,6 +19,7 @@ export interface Session {
   turns: Turn[]
   memoriesActive: SessionMemoryRef[]
   claudeSessionId?: string
+  model?: string
   loopName?: string
   loopContext?: string
   stepOutputs?: Record<string, string>

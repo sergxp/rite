@@ -34,7 +34,9 @@ if (!result.success) {
 const outPath = "dist/index.js"
 const content = await Bun.file(outPath).text()
 // Use env -S so macOS accepts the fallback path in one shebang line
-const bunPath = Bun.which("bun") ?? `${process.env.HOME}/.bun/bin/bun`
+// Strip .exe suffix — on Windows, npm's .ps1 wrapper appends its own .exe,
+// so including it in the shebang results in "bun.exe.exe".
+const bunPath = (Bun.which("bun") ?? `${process.env.HOME}/.bun/bin/bun`).replace(/\.exe$/i, "")
 writeFileSync(outPath, `#!/usr/bin/env -S ${bunPath}\n${content}`)
 chmodSync(outPath, 0o755)
 

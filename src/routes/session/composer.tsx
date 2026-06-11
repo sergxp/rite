@@ -1,6 +1,7 @@
 import { createSignal, createEffect, createMemo, For, Show } from "solid-js"
+import { useKeyboard } from "@opentui/solid"
 import { execa } from "execa"
-import type { InputRenderable, KeyEvent } from "@opentui/core"
+import type { TextareaRenderable, KeyEvent } from "@opentui/core"
 import { useTheme } from "../../context/theme"
 import { useConfig } from "../../context/config"
 import { useSessionStore } from "../../context/session-store"
@@ -33,7 +34,8 @@ interface ComposerProps {
   onStatus: (text: string) => void
 }
 
-const COMPOSER_HEIGHT = 3 // border-top + input line + border-bottom
+const COMPOSER_BORDER_HEIGHT = 2 // border-top + border-bottom
+const COMPOSER_MAX_INPUT_ROWS = 8
 
 // Commands offered by tab/arrow autocomplete. Ordered so prefix matches list
 // the way a user expects. Keep in sync with handleSlashCommand below.
@@ -42,12 +44,15 @@ const SLASH_COMMANDS = [
   "/clear",
   "/copy",
   "/memory",
+  "/model",
   "/resume",
   "/compact",
   "/loop",
   "/loop off",
   "/exit",
 ]
+
+const CLAUDE_MODELS = ["claude-fable-5", "claude-opus-4-8", "claude-sonnet-4-6"]
 
 function completionsFor(value: string): string[] {
   if (!value.startsWith("/") || value.length < 2) return []
@@ -61,6 +66,7 @@ const HELP_TEXT = [
   "  /clear            clear AI context (new Claude CLI session)",
   "  /copy             copy last response to clipboard",
   "  /memory           show loaded memories",
+  "  /model            show or switch model (claude backend only)",
   "  /resume           switch session (back to home)",
   "  /compact          compress conversation history",
   "  /loop             list available loops",
@@ -77,22 +83,61 @@ export function Composer(props: ComposerProps) {
   const exit = useExit()
 
   const [abortController, setAbortController] = createSignal<AbortController | null>(null)
-  let inputRef: InputRenderable | undefined
+  let textareaRef: TextareaRenderable | undefined
   // When a loop step asks for human input, this holds the resolver; the next
   // submit feeds it instead of starting a chat turn.
   let loopInputResolver: ((answer: string) => void) | null = null
 
-  // Autocomplete: input value is mirrored into a signal via the input's
-  // `onInput` event (fires on every insert AND delete), so suggestions track
-  // the field exactly — including when we set inputRef.value programmatically,
-  // which also emits `input`.
+  const [inputLines, setInputLines] = createSignal(1)
+
+  // Autocomplete: input value is mirrored into a signal via the textarea's
+  // onContentChange event (fires on every insert AND delete).
   const [inputValue, setInputValue] = createSignal("")
   const [selectedIdx, setSelectedIdx] = createSignal(0)
   const suggestions = createMemo(() => (props.streaming ? [] : completionsFor(inputValue())))
 
-  // Grow the composer by one row per suggestion so the session screen shrinks
-  // the message area to match (it budgets from the reported height).
-  createEffect(() => props.onHeightChange(COMPOSER_HEIGHT + suggestions().length))
+  // Message queued while a stream is in progress — auto-submitted when streaming ends.
+  const [queuedMessage, setQueuedMessage] = createSignal("")
+
+  // Model picker state — when open, the textarea unfocuses and arrow keys/enter
+  // drive selection. Escape closes without changing.
+  const [modelPickerOpen, setModelPickerOpen] = createSignal(false)
+  const [modelPickerIdx, setModelPickerIdx] = createSignal(0)
+  // Header (1) + N model rows + footer hint (1)
+  const modelPickerRows = () => (modelPickerOpen() ? CLAUDE_MODELS.length + 2 : 0)
+
+  // Grow the composer to fit the current input lines + suggestions + picker.
+  createEffect(() =>
+    props.onHeightChange(COMPOSER_BORDER_HEIGHT + inputLines() + suggestions().length + modelPickerRows()),
+  )
+
+  // When streaming ends, fire any queued message automatically.
+  createEffect(() => {
+    if (!props.streaming) {
+      const msg = queuedMessage()
+      if (msg) {
+        setQueuedMessage("")
+        void (async () => {
+          if (await handleSlashCommand(msg)) return
+          await submit(msg)
+        })()
+      }
+    }
+  })
+
+  // Drive the model picker globally so the unfocused textarea doesn't intercept keys.
+  useKeyboard((key) => {
+    if (!modelPickerOpen()) return
+    if (key.name === "up") {
+      setModelPickerIdx((i) => Math.max(0, i - 1))
+    } else if (key.name === "down") {
+      setModelPickerIdx((i) => Math.min(CLAUDE_MODELS.length - 1, i + 1))
+    } else if (key.name === "return") {
+      commitModelPick()
+    } else if (key.name === "escape") {
+      setModelPickerOpen(false)
+    }
+  })
 
   const sessionId = () => props.session.id
 
@@ -127,6 +172,52 @@ export function Composer(props: ComposerProps) {
       (m) => `${m.frontmatter.name}  [${m.tier} · ${m.frontmatter.inject}]`,
     )
     addSystem(`Loaded ${loaded.all.length} memorie(s):\n${lines.join("\n")}`)
+  }
+
+  function openModelPicker() {
+    if (props.session.backend !== "claude") {
+      addSystem("/model is only available with the claude backend.")
+      return
+    }
+    const current = CLAUDE_MODELS.findIndex((m) => m === props.session.model)
+    setModelPickerIdx(current >= 0 ? current : 0)
+    setModelPickerOpen(true)
+  }
+
+  function commitModelPick() {
+    const chosen = CLAUDE_MODELS[modelPickerIdx()]
+    setModelPickerOpen(false)
+    if (!chosen) return
+    if (chosen === props.session.model) {
+      addSystem(`Already using ${chosen}.`)
+      return
+    }
+    props.session.model = chosen
+    // Clear the Claude session so the next turn opens a fresh session with the new model.
+    props.session.claudeSessionId = undefined
+    void SessionStore.save(props.session)
+    store.upsertSession({ ...props.session })
+    addSystem(`Model switched to ${chosen}. Context cleared for new model.`)
+  }
+
+  function showOrSetModel(arg?: string) {
+    if (props.session.backend !== "claude") {
+      addSystem("/model is only available with the claude backend.")
+      return
+    }
+    if (!arg) {
+      openModelPicker()
+      return
+    }
+    if (!CLAUDE_MODELS.includes(arg)) {
+      addSystem(`Unknown model: ${arg}\nAvailable: ${CLAUDE_MODELS.join(", ")}`)
+      return
+    }
+    props.session.model = arg
+    props.session.claudeSessionId = undefined
+    void SessionStore.save(props.session)
+    store.upsertSession({ ...props.session })
+    addSystem(`Model switched to ${arg}. Context cleared for new model.`)
   }
 
   function clearContext() {
@@ -217,6 +308,11 @@ export function Composer(props: ComposerProps) {
       showMemories()
       return true
     }
+    if (trimmed === "/model" || trimmed.startsWith("/model ")) {
+      const arg = trimmed === "/model" ? undefined : trimmed.slice("/model ".length).trim()
+      showOrSetModel(arg)
+      return true
+    }
     if (trimmed === "/resume") {
       route.navigate({ type: "home" })
       return true
@@ -288,7 +384,13 @@ export function Composer(props: ComposerProps) {
 
       let review
       try {
-        review = await checkMemoryCompliance(responseWithTools, injectedMemories, config, ac.signal)
+        review = await checkMemoryCompliance(
+          responseWithTools,
+          injectedMemories,
+          config,
+          ac.signal,
+          props.history.getTurns().slice(-6),
+        )
       } catch {
         props.onStatus("")
         return
@@ -432,6 +534,7 @@ export function Composer(props: ComposerProps) {
       const backendFn = getBackend(s.backend)
       const stream = backendFn(enriched, ac.signal, {
         resumeSessionId: shouldResume ? s.claudeSessionId : undefined,
+        model: s.model,
       })
 
       let streamingItemLive = false
@@ -513,26 +616,32 @@ export function Composer(props: ComposerProps) {
         charCount: fullResponse.length,
       })
 
-      await compressHistoryIfNeeded(props.history, config)
+      if (!ac.signal.aborted) {
+        await compressHistoryIfNeeded(props.history, config)
+      }
 
-      void extractMemories(text, fullResponse, config, (count) => {
-        props.onStatus(`* saved ${count}`)
-        setTimeout(() => props.onStatus(""), 4000)
-      }, sid)
+      if (!ac.signal.aborted) {
+        void extractMemories(text, fullResponse, config, (count) => {
+          props.onStatus(`* saved ${count}`)
+          setTimeout(() => props.onStatus(""), 4000)
+        }, sid)
+      }
 
       // ── Default system loop: memory-compliance review ────────────────────
       // After every normal response, if behavioral memories were injected,
       // check the response against them and send correction turns on failure.
-      await runComplianceReview({
-        session: s,
-        ac,
-        injectedMemories: [...alwaysMemories, ...semanticHits],
-        firstResponse: fullResponse,
-        firstToolEvidence: completedToolCalls,
-        alwaysMemories,
-        semanticHits,
-        shouldResume,
-      })
+      if (!ac.signal.aborted) {
+        await runComplianceReview({
+          session: s,
+          ac,
+          injectedMemories: [...alwaysMemories, ...semanticHits],
+          firstResponse: fullResponse,
+          firstToolEvidence: completedToolCalls,
+          alwaysMemories,
+          semanticHits,
+          shouldResume,
+        })
+      }
     } catch (err: unknown) {
       if ((err as Error)?.name !== "AbortError") {
         addSystem(`Error: ${(err as Error).message}`)
@@ -548,12 +657,12 @@ export function Composer(props: ComposerProps) {
   /** Replace the input with the highlighted suggestion (plus a trailing space). */
   function acceptSuggestion(): boolean {
     const sug = suggestions()
-    if (sug.length === 0 || !inputRef) return false
+    if (sug.length === 0 || !textareaRef) return false
     const sel = sug[selectedIdx()] ?? sug[0]
     if (!sel) return false
-    // Setting .value emits `input`, which syncs inputValue and recomputes
-    // suggestions; a fully-typed command then collapses the list to itself.
-    inputRef.value = sel.endsWith(" ") ? sel : `${sel} `
+    // Setting text emits `onContentChange`, which syncs inputValue and
+    // recomputes suggestions; a fully-typed command then collapses the list.
+    textareaRef.setText(sel.endsWith(" ") ? sel : `${sel} `)
     return true
   }
 
@@ -579,17 +688,24 @@ export function Composer(props: ComposerProps) {
     }
 
     if (props.streaming && key.name === "escape") {
-      abortController()?.abort()
+      // preventDefault so the textarea doesn't blur (its default escape behavior).
+      key.preventDefault()
+      const ac = abortController()
+      if (ac && !ac.signal.aborted) {
+        ac.abort()
+        props.onStatus("✻ aborting…")
+      }
+      return
     }
-    if (!props.streaming && key.name === "q" && !inputRef?.value) {
+    if (!props.streaming && key.name === "q" && !textareaRef?.plainText) {
       route.navigate({ type: "home" })
     }
   }
 
   function onSubmit() {
-    let text = (inputRef?.value ?? "").trim()
+    let text = (textareaRef?.plainText ?? "").trim()
     if (!text) return
-    if (inputRef) inputRef.value = ""
+    if (textareaRef) textareaRef.clear()
 
     // A waiting loop step consumes the input verbatim — no command parsing.
     if (loopInputResolver) {
@@ -616,7 +732,13 @@ export function Composer(props: ComposerProps) {
       abortController()?.abort()
       return
     }
-    if (props.streaming) return
+    // While streaming, queue the message and show a hint — it will fire automatically
+    // when the current stream finishes.
+    if (props.streaming) {
+      setQueuedMessage(text)
+      addSystem(`⏳ Queued: "${text.length > 60 ? text.slice(0, 60) + "…" : text}"`)
+      return
+    }
 
     void (async () => {
       if (await handleSlashCommand(text)) return
@@ -625,28 +747,56 @@ export function Composer(props: ComposerProps) {
   }
 
   return (
-    <box flexDirection="column" height={COMPOSER_HEIGHT + suggestions().length}>
+    <box flexDirection="column" height={COMPOSER_BORDER_HEIGHT + inputLines() + suggestions().length + modelPickerRows()}>
+      <Show when={modelPickerOpen()}>
+        <box flexDirection="column" paddingLeft={2}>
+          <text fg={theme.textMuted}>Select model (↑↓ navigate · ↵ pick · esc cancel):</text>
+          <For each={CLAUDE_MODELS}>
+            {(m, i) => (
+              <text fg={i() === modelPickerIdx() ? theme.primary : theme.textMuted}>
+                {i() === modelPickerIdx() ? "▶ " : "  "}
+                {m}
+                {m === props.session.model ? "  (current)" : ""}
+              </text>
+            )}
+          </For>
+          <text fg={theme.textDim}> </text>
+        </box>
+      </Show>
+
       <box
         flexDirection="column"
-        height={COMPOSER_HEIGHT}
+        height={COMPOSER_BORDER_HEIGHT + inputLines()}
         borderStyle="single"
         borderColor={props.streaming ? theme.primary : theme.border}
         paddingLeft={1}
         paddingRight={1}
       >
-        <input
-          ref={inputRef}
-          focused={true}
-          placeholder={props.streaming ? "● streaming  (esc to abort)" : "Message… (↵ send, /help, q back)"}
+        <textarea
+          ref={textareaRef}
+          focused={!modelPickerOpen()}
+          placeholder={props.streaming ? "● streaming  (esc to abort)" : "Message… (↵ send, shift+↵ newline, /help, q back)"}
           placeholderColor={theme.textDim}
           textColor={theme.text}
+          wrapMode="word"
           flexGrow={1}
-          onInput={(value) => {
+          minHeight={1}
+          maxHeight={COMPOSER_MAX_INPUT_ROWS}
+          onContentChange={() => {
+            const value = textareaRef?.plainText ?? ""
             setInputValue(value)
             setSelectedIdx(0)
+            setInputLines(Math.min(COMPOSER_MAX_INPUT_ROWS, Math.max(1, textareaRef?.virtualLineCount ?? 1)))
           }}
-          onSubmit={onSubmit}
-          onKeyDown={onComposerKey}
+          onKeyDown={(key) => {
+            // Enter without shift → submit; shift+Enter → newline (handled by textarea).
+            if (key.name === "return" && !key.shift) {
+              key.preventDefault()
+              onSubmit()
+              return
+            }
+            onComposerKey(key)
+          }}
         />
       </box>
 

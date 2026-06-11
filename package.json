@@ -10,7 +10,10 @@
     "build": "bun run build.ts",
     "dev": "bun src/index.ts",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "e2e": "python3 e2e.py",
+    "e2e:scroll": "python3 e2e_scroll.py",
+    "e2e:review": "python3 e2e_review.py"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.99.0",

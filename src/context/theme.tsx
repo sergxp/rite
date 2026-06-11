@@ -2,10 +2,8 @@ import { SyntaxStyle } from "@opentui/core"
 import { createSimpleContext } from "./helper"
 
 export interface Theme {
-  background: string
-  surface: string
   border: string
-  text: string
+  text: string | undefined
   textMuted: string
   textDim: string
   primary: string
@@ -13,31 +11,49 @@ export interface Theme {
   warning: string
   error: string
   info: string
-  userMsg: string
-  assistantMsg: string
+  userMsg: string | undefined
+  assistantMsg: string | undefined
   toolName: string
   toolOutput: string
   syntaxStyle: SyntaxStyle
 }
 
-function makeDarkTheme(): Theme {
+// Styles for the markdown markup groups the <markdown> renderer emits. Without
+// these, SyntaxStyle.create() is empty: markers get concealed but emphasis
+// (bold, inline code, headings, links) falls back to plain text — which is why
+// assistant responses read flat. Registering these restores visual emphasis,
+// using the system-tone palette so it stays terminal-native.
+function makeMarkdownStyle(): SyntaxStyle {
+  return SyntaxStyle.fromStyles({
+    "markup.heading": { fg: "cyan", bold: true },
+    "markup.strong": { bold: true },
+    "markup.italic": { italic: true },
+    "markup.strikethrough": { dim: true },
+    "markup.raw": { fg: "yellow" },              // inline code + code fences
+    "markup.link": { fg: "cyan", underline: true },
+    "markup.link.label": { fg: "cyan" },
+    "markup.link.url": { fg: "cyan", underline: true },
+    "markup.list": { fg: "cyan" },               // list bullets / numbers
+    "markup.quote": { fg: "gray", italic: true },
+  })
+}
+
+function makeTheme(): Theme {
   return {
-    background: "#1a1b26",
-    surface: "#24283b",
-    border: "#3d4466",
-    text: "#a9b1d6",
-    textMuted: "#565f89",
-    textDim: "#414868",
-    primary: "#7aa2f7",
-    success: "#9ece6a",
-    warning: "#e0af68",
-    error: "#f7768e",
-    info: "#2ac3de",
-    userMsg: "#c0caf5",
-    assistantMsg: "#a9b1d6",
-    toolName: "#7dcfff",
-    toolOutput: "#565f89",
-    syntaxStyle: SyntaxStyle.create(),
+    border: "gray",
+    text: undefined,      // inherit terminal default foreground
+    textMuted: "gray",
+    textDim: "gray",
+    primary: "cyan",
+    success: "green",
+    warning: "yellow",
+    error: "red",
+    info: "cyan",
+    userMsg: undefined,   // inherit terminal default foreground
+    assistantMsg: undefined,
+    toolName: "cyan",
+    toolOutput: "gray",
+    syntaxStyle: makeMarkdownStyle(),
   }
 }
 
@@ -46,5 +62,5 @@ export const {
   provider: ThemeProvider,
 } = createSimpleContext({
   name: "Theme",
-  init: makeDarkTheme,
+  init: makeTheme,
 })

@@ -1,11 +1,18 @@
 import { writeFileSync, chmodSync } from "fs"
+import solidPlugin from "@opentui/solid/bun-plugin"
 
 const result = await Bun.build({
   entrypoints: ["src/index.ts"],
   outdir: "dist",
   target: "bun",
-  // Keep opentui packages external — they use dynamic imports to load the
-  // native .dylib and need to resolve from node_modules at runtime.
+  // The solid plugin compiles our JSX with babel-preset-solid and swaps
+  // solid-js's SSR build for the client build. @opentui/solid and solid-js
+  // must be BUNDLED (not external) so the dist carries that client build and
+  // a single solid-js instance — externalized, the runtime would resolve the
+  // SSR build and context/reactivity break across the renderer boundary.
+  plugins: [solidPlugin],
+  // Keep @opentui/core external — it dynamically loads the native .dylib and
+  // needs to resolve from node_modules at runtime.
   external: [
     "@opentui/core",
     "@opentui/core-darwin-arm64",
@@ -14,11 +21,7 @@ const result = await Bun.build({
     "@opentui/core-linux-arm64",
     "@opentui/core-win32-x64",
     "@opentui/core-win32-arm64",
-    "@opentui/solid",
     "@opentui/keymap",
-    "solid-js",
-    "solid-js/store",
-    "solid-js/web",
   ],
 })
 

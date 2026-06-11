@@ -2,12 +2,14 @@ import { createSignal, createEffect, For, Show } from "solid-js"
 import { useKeyboard } from "@opentui/solid"
 import { useTheme, type Theme } from "../context/theme"
 import { useRoute } from "../context/route"
+import { useExit } from "../context/exit"
 import { useSessionStore } from "../context/session-store"
 import { SessionStore } from "../sessions/store"
 
 export function Home() {
   const theme = useTheme()
   const route = useRoute()
+  const exit = useExit()
   const store = useSessionStore()
 
   const [selected, setSelected] = createSignal(0)
@@ -25,6 +27,8 @@ export function Home() {
       setSelected((s) => Math.max(0, s - 1))
     } else if (key.name === "down" || (key.ctrl && key.name === "n")) {
       setSelected((s) => Math.min(sessions.length, s + 1))
+    } else if (key.name === "q") {
+      exit()
     } else if (key.name === "return") {
       const idx = selected()
       if (idx === 0) {
@@ -79,7 +83,6 @@ function SessionRow(props: {
     <box
       flexDirection="row"
       gap={1}
-      backgroundColor={props.selected ? props.theme.surface : undefined}
       paddingLeft={1}
       paddingRight={1}
     >

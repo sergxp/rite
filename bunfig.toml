@@ -1,0 +1,5 @@
+# @opentui/solid setup (see its README):
+# - transforms JSX in our sources with babel-preset-solid
+# - swaps solid-js's SSR build (dist/server.js) for the client build so the
+#   app and @opentui/solid share one solid-js runtime (context, reactivity)
+preload = ["@opentui/solid/preload"]

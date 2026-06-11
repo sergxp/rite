@@ -6,17 +6,21 @@ function sessionsDir(cwd: string): string {
   return join(cwd, ".rite", "sessions")
 }
 
-function makeId(): string {
+export function makeSessionId(): string {
   const now = new Date()
   const p = (n: number) => String(n).padStart(2, "0")
-  return `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())}-${p(now.getHours())}${p(now.getMinutes())}${p(now.getSeconds())}`
+  const stamp = `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())}-${p(now.getHours())}${p(now.getMinutes())}${p(now.getSeconds())}`
+  // Entropy suffix: two sessions created within the same second must not
+  // share an id, or the later save silently overwrites the earlier file.
+  const suffix = Math.random().toString(36).slice(2, 6)
+  return `${stamp}-${suffix}`
 }
 
 export const SessionStore = {
   create(opts: { cwd: string; backend?: Session["backend"]; type?: Session["type"] }): Session {
     const now = new Date().toISOString()
     return {
-      id: makeId(),
+      id: makeSessionId(),
       name: null,
       createdAt: now,
       updatedAt: now,

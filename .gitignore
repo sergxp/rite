@@ -2,3 +2,12 @@ node_modules/
 dist/
 *.log
 .env
+
+# Rite runtime data + e2e scratch
+.rite/
+__pycache__/
+.e2e-*
+.review-*.jsonl
+.scroll-*.jsonl
+.md-*.jsonl
+.hr-*.jsonl

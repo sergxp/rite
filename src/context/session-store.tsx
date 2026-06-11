@@ -1,11 +1,31 @@
-import { batch } from "solid-js"
-import { createStore, produce } from "solid-js/store"
+import { createStore, produce, unwrap } from "solid-js/store"
 import { createSimpleContext } from "./helper"
 import type { Session, Turn } from "../sessions/types"
 
+/**
+ * What the session transcript renders. Richer than persisted `Turn`s:
+ * thinking blocks, tool calls, and system notices appear in the UI but only
+ * user/assistant turns are saved to disk (mirrors v1).
+ */
+export type DisplayItem =
+  | { kind: "user"; content: string }
+  | { kind: "assistant"; content: string; streaming?: boolean }
+  | { kind: "thinking"; content: string }
+  | { kind: "tool"; name: string; inputJson: string; result: string; isError: boolean; durationMs: number }
+  | { kind: "system"; content: string }
+
+export function turnsToItems(turns: Turn[]): DisplayItem[] {
+  return turns.map((t) =>
+    t.role === "user"
+      ? { kind: "user" as const, content: t.content }
+      : { kind: "assistant" as const, content: t.content },
+  )
+}
+
 interface SessionStoreState {
   sessions: Session[]
-  activeTurns: Record<string, Turn[]>
+  /** Per-session transcript display items, keyed by session id. */
+  items: Record<string, DisplayItem[]>
   loading: boolean
 }
 
@@ -17,7 +37,7 @@ export const {
   init: () => {
     const [store, setStore] = createStore<SessionStoreState>({
       sessions: [],
-      activeTurns: {},
+      items: {},
       loading: false,
     })
 
@@ -26,33 +46,47 @@ export const {
     }
 
     function upsertSession(session: Session) {
+      // Deep-copy on the way in. Callers hold and mutate their own session
+      // objects (turns.push, etc.); re-inserting a reference the store
+      // already tracks leaves nested nodes (like turns) with stale signals —
+      // the UI would keep rendering the old length forever.
+      const copy = structuredClone(unwrap(session))
       setStore(
         produce((s) => {
-          const idx = s.sessions.findIndex((x) => x.id === session.id)
-          if (idx === -1) s.sessions.unshift(session)
-          else s.sessions[idx] = session
+          const idx = s.sessions.findIndex((x) => x.id === copy.id)
+          if (idx === -1) s.sessions.unshift(copy)
+          else s.sessions[idx] = copy
         }),
       )
     }
 
-    function setTurns(sessionId: string, turns: Turn[]) {
-      setStore("activeTurns", sessionId, turns)
-    }
-
-    function appendTurn(sessionId: string, turn: Turn) {
+    function removeSession(sessionId: string) {
       setStore(
         produce((s) => {
-          if (!s.activeTurns[sessionId]) s.activeTurns[sessionId] = []
-          s.activeTurns[sessionId]!.push(turn)
+          s.sessions = s.sessions.filter((x) => x.id !== sessionId)
+          delete s.items[sessionId]
         }),
       )
     }
 
-    function updateLastTurn(sessionId: string, updater: (turn: Turn) => void) {
+    function setItems(sessionId: string, items: DisplayItem[]) {
+      setStore("items", sessionId, items)
+    }
+
+    function appendItem(sessionId: string, item: DisplayItem) {
       setStore(
         produce((s) => {
-          const turns = s.activeTurns[sessionId]
-          if (turns && turns.length > 0) updater(turns[turns.length - 1]!)
+          if (!s.items[sessionId]) s.items[sessionId] = []
+          s.items[sessionId]!.push(item)
+        }),
+      )
+    }
+
+    function updateLastItem(sessionId: string, updater: (item: DisplayItem) => void) {
+      setStore(
+        produce((s) => {
+          const items = s.items[sessionId]
+          if (items && items.length > 0) updater(items[items.length - 1]!)
         }),
       )
     }
@@ -65,9 +99,10 @@ export const {
       store,
       setSessions,
       upsertSession,
-      setTurns,
-      appendTurn,
-      updateLastTurn,
+      removeSession,
+      setItems,
+      appendItem,
+      updateLastItem,
       setLoading,
     }
   },

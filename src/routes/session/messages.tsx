@@ -12,6 +12,16 @@ interface MessagesProps {
 // labeled block rather than an undifferentiated wall of text.
 const CONTENT_INDENT = 2
 
+// Wheel sensitivity: lines scrolled per notch. opentui's default accel moves a
+// single line per notch, which feels sluggish in a long transcript. A constant
+// multiplier scrolls several lines per notch while staying predictable (unlike
+// velocity-based acceleration, which only kicks in on fast streaks).
+const SCROLL_LINES_PER_NOTCH = 2
+const SCROLL_ACCEL = {
+  tick: () => SCROLL_LINES_PER_NOTCH,
+  reset: () => {},
+}
+
 export function Messages(props: MessagesProps) {
   const theme = useTheme()
   const store = useSessionStore()
@@ -25,6 +35,7 @@ export function Messages(props: MessagesProps) {
       width={props.width}
       stickyScroll
       stickyStart="bottom"
+      scrollAcceleration={SCROLL_ACCEL}
       flexDirection="column"
       paddingLeft={1}
       paddingRight={1}

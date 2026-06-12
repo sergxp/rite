@@ -1,6 +1,5 @@
 import { createSignal, createEffect, createMemo, For, Show } from "solid-js"
 import { useKeyboard } from "@opentui/solid"
-import { execa } from "execa"
 import type { TextareaRenderable, KeyEvent } from "@opentui/core"
 import { useTheme } from "../../context/theme"
 import { useConfig } from "../../context/config"
@@ -20,6 +19,7 @@ import { SessionStore } from "../../sessions/store"
 import { loadLoops, findLoop } from "../../loops/registry"
 import { runLoopTui } from "../../loops/runner"
 import { checkMemoryCompliance, TOOL_EVIDENCE_HEADER } from "../../loops/default-review"
+import { copyToClipboard } from "../../utils/clipboard"
 import type { ConversationHistory } from "../../history/history"
 import type { MemoryFile } from "../../memory/types"
 import type { Session } from "../../sessions/types"
@@ -152,14 +152,8 @@ export function Composer(props: ComposerProps) {
       addSystem("Nothing to copy.")
       return
     }
-    try {
-      const cmd = process.platform === "darwin" ? "pbcopy" : "xclip"
-      const args = process.platform === "darwin" ? [] : ["-selection", "clipboard"]
-      await execa(cmd, args, { input: last.content })
-      addSystem("Copied last response to clipboard.")
-    } catch {
-      addSystem("Copy failed — clipboard tool not available.")
-    }
+    const ok = await copyToClipboard(last.content)
+    addSystem(ok ? "Copied last response to clipboard." : "Copy failed — no clipboard tool available.")
   }
 
   function showMemories() {
@@ -662,7 +656,11 @@ export function Composer(props: ComposerProps) {
     if (!sel) return false
     // Setting text emits `onContentChange`, which syncs inputValue and
     // recomputes suggestions; a fully-typed command then collapses the list.
-    textareaRef.setText(sel.endsWith(" ") ? sel : `${sel} `)
+    const value = sel.endsWith(" ") ? sel : `${sel} `
+    textareaRef.setText(value)
+    // setText leaves the cursor at offset 0 — move it to the end so the user
+    // can immediately type the command's argument (or backspace) from there.
+    textareaRef.cursorOffset = value.length
     return true
   }
 

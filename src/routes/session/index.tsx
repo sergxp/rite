@@ -1,5 +1,5 @@
 import { createSignal, onMount, Show } from "solid-js"
-import { useTerminalDimensions } from "@opentui/solid"
+import { useTerminalDimensions, useSelectionHandler } from "@opentui/solid"
 import { useRoute } from "../../context/route"
 import { useConfig } from "../../context/config"
 import { useSessionStore, turnsToItems } from "../../context/session-store"
@@ -8,6 +8,7 @@ import { Composer } from "./composer"
 import { Footer } from "./footer"
 import { SessionStore } from "../../sessions/store"
 import { ConversationHistory } from "../../history/history"
+import { copyToClipboard } from "../../utils/clipboard"
 import type { Session } from "../../sessions/types"
 
 // Height reserved for composer (min 3) and footer (1)
@@ -30,6 +31,20 @@ export function Session() {
   // persisted turns on resume. Used for prompt enrichment when the Claude CLI
   // session can't be resumed, and for /compact.
   const history = new ConversationHistory(config.historyLimit)
+
+  // Mouse selection → clipboard. Enabling mouse tracking (for the scroll wheel)
+  // suppresses the terminal's own select-to-copy, so opentui handles selection
+  // and we copy the result on mouse-release. Fires with a Selection; copy only
+  // when it actually spans text.
+  useSelectionHandler((selection) => {
+    const text = selection?.getSelectedText?.() ?? ""
+    if (!text.trim()) return
+    const chars = text.length
+    void copyToClipboard(text).then((ok) => {
+      setStatus(ok ? `✓ copied ${chars} char${chars === 1 ? "" : "s"}` : "copy failed (no clipboard tool)")
+      setTimeout(() => setStatus(""), 2500)
+    })
+  })
 
   // Load or create session on mount. Deliberately onMount, not createEffect:
   // this reads route.data() and then navigates (writes route.data), so a

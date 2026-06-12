@@ -79,6 +79,22 @@ def main():
         check("scroll: sticky-bottom shows last line", "SCROLLBOT_MARKER" in before)
         check("scroll: top line off-screen initially", "SCROLLTOP_MARKER" not in before)
 
+        # Sensitivity: a few notches should move several lines each, not 1:1.
+        import re
+        def topmost_filler(snap):
+            nums = [int(m.group(1)) for ln in snap.splitlines()
+                    for m in [re.search(r"filler line (\d+)", ln)] if m]
+            return min(nums) if nums else None
+        t0 = topmost_filler(before)
+        for _ in range(3):
+            d.send(b"\x1b[<64;20;5M")
+            time.sleep(0.06)
+        d.wait_idle(timeout=2.0, idle_for=0.4)
+        t1 = topmost_filler(d.snapshot())
+        moved = (t0 - t1) if (t0 is not None and t1 is not None) else 0
+        print(f"  [sensitivity] topmost filler {t0} -> {t1}: {moved} lines over 3 notches")
+        check("scroll: multiple lines per notch (not 1:1)", moved >= 5)
+
         # Wheel up (SGR button 64 = wheel up) over the transcript, enough ticks
         # to reach the top regardless of acceleration.
         for _ in range(160):

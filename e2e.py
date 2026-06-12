@@ -388,9 +388,11 @@ def main():
         ac3 = driver.snapshot()
         check("autocomplete: Tab completes + collapses list", "▶ /clear" not in ac3)
 
-        # clear the field, then test Enter resolving a partial command
+        # clear the field, then test Enter resolving a partial command.
+        # The composer enables the kitty keyboard protocol, so backspace is
+        # encoded as CSI 127 u (raw \x7f is not recognized in that mode).
         for _ in range(8):
-            driver.send(b"\x7f")
+            driver.send(b"\x1b[127u")
             time.sleep(0.02)
         driver.wait_idle(timeout=2.0, idle_for=0.4)
 

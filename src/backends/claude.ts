@@ -3,6 +3,8 @@ import { existsSync, mkdirSync, writeFileSync } from "fs"
 import { join } from "path"
 import os from "os"
 import type { BackendCallOpts, BackendEvent } from "./types.js"
+import { log } from "../utils/logger.js"
+import { RITE_SYSTEM_PROMPT } from "./rite-system-prompt.js"
 
 function isEnoent(err: unknown): boolean {
   return err instanceof Error && (err as NodeJS.ErrnoException).code === "ENOENT"
@@ -43,6 +45,9 @@ export async function callClaudeCliBlocking(
     args.push("--system-prompt", options.systemPrompt)
   }
 
+  const utilLog = log.child("claude.blocking", { model: options?.model })
+  utilLog.debug("call.start", { promptLen: prompt.length, hasSystem: !!options?.systemPrompt })
+  const startedAt = Date.now()
   try {
     const result = await execa("claude", args, {
       reject: false,
@@ -51,12 +56,22 @@ export async function callClaudeCliBlocking(
       cancelSignal: options?.signal,
       forceKillAfterDelay: 200,
     })
-    // If aborted, return empty regardless of what stdout buffered.
-    if (options?.signal?.aborted) return ""
-    return result.stdout?.trim() ?? ""
+    if (options?.signal?.aborted) {
+      utilLog.info("call.aborted", { durationMs: Date.now() - startedAt })
+      return ""
+    }
+    const out = result.stdout?.trim() ?? ""
+    utilLog.debug("call.done", { durationMs: Date.now() - startedAt, outLen: out.length, exitCode: result.exitCode })
+    if (result.stderr && result.stderr.trim()) {
+      utilLog.warn("call.stderr", { stderr: result.stderr.slice(0, 2000) })
+    }
+    return out
   } catch (err) {
-    if (isEnoent(err)) throw notFoundError()
-    // Cancelled — return empty string silently.
+    if (isEnoent(err)) {
+      utilLog.error("call.binaryMissing")
+      throw notFoundError()
+    }
+    utilLog.warn("call.cancelled", { err })
     return ""
   }
 }
@@ -72,12 +87,44 @@ export async function* callClaude(
   signal?: AbortSignal,
   opts?: BackendCallOpts,
 ): AsyncIterable<BackendEvent> {
-  const args = ["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--dangerously-skip-permissions"]
+  const args = ["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--dangerously-skip-permissions", "--append-system-prompt", RITE_SYSTEM_PROMPT]
   if (opts?.resumeSessionId) {
     args.push("--resume", opts.resumeSessionId)
   }
   if (opts?.model) {
     args.push("--model", opts.model)
+  }
+
+  const turnLog = log.child("claude.stream", {
+    sessionId: opts?.sessionId,
+    turnId: opts?.turnId,
+    model: opts?.model,
+  })
+  turnLog.info("turn.start", {
+    promptLen: prompt.length,
+    resume: !!opts?.resumeSessionId,
+  })
+  const startedAt = Date.now()
+
+  // Tee raw subprocess output to a per-turn file when trace logging is on.
+  // Massively helpful for diagnosing stream/parsing bugs after the fact.
+  let rawSink: ((chunk: string) => void) | null = null
+  if (opts?.sessionId && opts?.turnId) {
+    try {
+      const dir = join(os.homedir(), ".rite", "logs", "sessions", opts.sessionId)
+      mkdirSync(dir, { recursive: true })
+      const path = join(dir, `claude-${opts.turnId}.ndjson`)
+      const { appendFileSync } = await import("fs")
+      rawSink = (chunk: string) => {
+        try {
+          appendFileSync(path, chunk, "utf-8")
+        } catch {
+          /* ignore */
+        }
+      }
+    } catch {
+      /* ignore */
+    }
   }
 
   const subprocess = execa("claude", args, {
@@ -88,29 +135,49 @@ export async function* callClaude(
     forceKillAfterDelay: 200,
   })
 
+  // Capture stderr — it's often the only place the CLI surfaces errors.
+  if (subprocess.stderr) {
+    let stderrBuf = ""
+    ;(async () => {
+      for await (const chunk of subprocess.stderr!) {
+        stderrBuf += chunk.toString()
+        if (stderrBuf.length > 8000) stderrBuf = stderrBuf.slice(-8000)
+      }
+      if (stderrBuf.trim()) {
+        turnLog.warn("turn.stderr", { stderr: stderrBuf.slice(0, 4000) })
+      }
+    })().catch(() => {})
+  }
+
   if (!subprocess.stdout) {
     try {
       const result = await subprocess
       if (result.stdout) yield { type: "text", content: result.stdout }
+      turnLog.info("turn.end", { durationMs: Date.now() - startedAt, mode: "no-stdout" })
     } catch (err) {
-      if (isEnoent(err)) throw notFoundError()
+      if (isEnoent(err)) {
+        turnLog.error("turn.binaryMissing")
+        throw notFoundError()
+      }
+      turnLog.error("turn.failed", { err })
       throw err
     }
     return
   }
 
-  // Track tool_use blocks (to emit tool_done on stop) and thinking blocks (to route deltas).
   const toolBlocks = new Map<number, { name: string; id: string; inputJson: string }>()
   const thinkingBlocks = new Set<number>()
 
-  // Track message turns so we can inject a separator between multi-turn responses.
   let assistantMessageCount = 0
   let hasEmittedText = false
+  let eventCount = 0
 
   let buffer = ""
   try {
     for await (const chunk of subprocess.stdout) {
-      buffer += chunk.toString()
+      const chunkStr = chunk.toString()
+      if (rawSink) rawSink(chunkStr)
+      buffer += chunkStr
 
       const lines = buffer.split("\n")
       buffer = lines.pop() ?? ""
@@ -121,14 +188,14 @@ export async function* callClaude(
         try {
           event = JSON.parse(line) as Record<string, unknown>
         } catch {
-          // Non-JSON line from CLI (e.g. debug output) — discard, don't surface as text.
           continue
         }
+        eventCount++
 
-        // Capture session ID from the init event so callers can resume the session.
         if (event.type === "system" && (event.subtype as string) === "init") {
           const sid = event.session_id
           if (typeof sid === "string" && sid) {
+            turnLog.debug("turn.sessionId", { claudeSessionId: sid })
             yield { type: "session_id", sessionId: sid }
           }
           continue
@@ -227,7 +294,11 @@ export async function* callClaude(
       }
     }
   } catch (err) {
-    if (isEnoent(err)) throw notFoundError()
+    if (isEnoent(err)) {
+      turnLog.error("turn.binaryMissing")
+      throw notFoundError()
+    }
+    turnLog.error("turn.failed", { err, eventCount, durationMs: Date.now() - startedAt })
     throw err
   }
 
@@ -249,4 +320,9 @@ export async function* callClaude(
   }
 
   await subprocess
+  turnLog.info("turn.end", {
+    durationMs: Date.now() - startedAt,
+    eventCount,
+    aborted: signal?.aborted ?? false,
+  })
 }

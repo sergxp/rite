@@ -7,6 +7,7 @@ memory/.index/
 sessions/
 audit.jsonl
 config.json
+logs/
 `;
 
 export function ensureRiteDir(): void {

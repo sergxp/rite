@@ -1,4 +1,4 @@
-import { Show, Switch, Match } from "solid-js"
+import { Show, Switch, Match, ErrorBoundary } from "solid-js"
 import { render, useTerminalDimensions } from "@opentui/solid"
 import { createCliRenderer } from "@opentui/core"
 import { ThemeProvider } from "./context/theme"
@@ -8,6 +8,7 @@ import { ConfigProvider } from "./context/config"
 import { SessionStoreProvider } from "./context/session-store"
 import { loadConfig } from "./config/loader"
 import { ensureRiteDir } from "./utils/init"
+import { installCrashHandlers, log } from "./utils/logger"
 import { Home } from "./routes/home"
 import { Session } from "./routes/session/index"
 
@@ -40,6 +41,28 @@ export interface AppOptions {
 
 export async function startApp(options: AppOptions = {}) {
   ensureRiteDir()
+  installCrashHandlers()
+  let claudeVersion: string | undefined
+  try {
+    const { execSync } = await import("child_process")
+    claudeVersion = execSync("claude --version", { stdio: ["ignore", "pipe", "ignore"], timeout: 2000 }).toString().trim()
+  } catch {
+    claudeVersion = undefined
+  }
+  log.info("app.start", {
+    scope: "app",
+    resumeSessionId: options.resumeSessionId,
+    cwd: options.cwd ?? process.cwd(),
+    node: process.version,
+    platform: process.platform,
+    arch: process.arch,
+    term: process.env.TERM,
+    termProgram: process.env.TERM_PROGRAM,
+    bun: typeof Bun !== "undefined" ? Bun.version : undefined,
+    claudeVersion,
+    riteVersion: "2.0.0",
+    logLevel: (await import("./utils/logger")).getLogLevel(),
+  })
   const config = await loadConfig()
   const renderer = await createCliRenderer({
     screenMode: "alternate-screen",
@@ -70,17 +93,29 @@ export async function startApp(options: AppOptions = {}) {
 
   await render(
     () => (
-      <ExitProvider exit={() => renderer.destroy()}>
-        <ThemeProvider>
-          <ConfigProvider config={config}>
-            <SessionStoreProvider>
-              <RouteProvider initialSessionId={options.resumeSessionId}>
-                <App />
-              </RouteProvider>
-            </SessionStoreProvider>
-          </ConfigProvider>
-        </ThemeProvider>
-      </ExitProvider>
+      <ErrorBoundary
+        fallback={(err: unknown) => {
+          log.error("render.boundary", { scope: "render", err })
+          return (
+            <box flexDirection="column" padding={2}>
+              <text fg="red">{`⚠ Render error — see logs (${(err as Error)?.message ?? String(err)})`}</text>
+              <text fg="gray">Press Ctrl+C to exit.</text>
+            </box>
+          )
+        }}
+      >
+        <ExitProvider exit={() => renderer.destroy()}>
+          <ThemeProvider>
+            <ConfigProvider config={config}>
+              <SessionStoreProvider>
+                <RouteProvider initialSessionId={options.resumeSessionId}>
+                  <App />
+                </RouteProvider>
+              </SessionStoreProvider>
+            </ConfigProvider>
+          </ThemeProvider>
+        </ExitProvider>
+      </ErrorBoundary>
     ),
     renderer,
   )

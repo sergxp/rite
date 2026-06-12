@@ -2,6 +2,7 @@ import { readFileSync } from "fs";
 import { callUtilityBlocking } from "../backends/utility.js";
 import type { MemoryFile } from "../memory/types.js";
 import type { RiteConfig } from "../config/types.js";
+import { log } from "../utils/logger.js";
 
 export interface DefaultReviewResult {
   passed: boolean;
@@ -61,33 +62,45 @@ export async function checkMemoryCompliance(
       : ""
 
   const prompt = [
-    "You are a behavioral compliance checker for an AI assistant.",
-    "Check whether the assistant response followed all BEHAVIORAL guidelines from the memories below.",
-    "Only flag violations of explicit rules, instructions, or style guidelines.",
-    "Ignore informational memories (facts, references, project context, user descriptions) — those don't require compliance.",
-    "If there are no behavioral guidelines in the memories, respond with passed: true.",
-    "Use the conversation context to understand whether the response was appropriate for the situation before flagging it.",
-    `IMPORTANT: The response may include a '${TOOL_EVIDENCE_HEADER}' section. Treat those tool calls as verification evidence. If the assistant called Read/Grep/Bash/etc. on a file before making claims about it, the verification requirement is satisfied.`,
+    "You are a behavioral compliance reviewer for an AI assistant. Your job is to catch CLEAR, SUBSTANTIVE violations of behavioral guidelines — not to nitpick.",
     "",
-    "Memory content:",
+    "REVIEW PRINCIPLES:",
+    "1. Be charitable. Read the response in the spirit of the conversation, not as an isolated string. If a reasonable person familiar with the context would consider the response acceptable, pass it.",
+    "2. Only flag violations that are unambiguous. If a guideline could reasonably be interpreted in more than one way and the response satisfies any reasonable interpretation, pass it.",
+    "3. Distinguish behavioral rules (what the assistant must/must not do, style, tone, process) from informational memories (facts, project context, user info, references). Only behavioral rules can be violated. Pass if the memories contain no behavioral rules.",
+    "4. Judge by intent, not phrasing. If a guideline says \"verify before claiming\" and the assistant did verify (via tool evidence or by quoting the user's own statement), it has complied even if it didn't say the word \"verified\".",
+    "5. Brevity, formatting, and tone rules apply to the response as a whole; minor stylistic blips don't constitute violation. Flag only when the response materially departs from the rule.",
+    "6. Conversational responses (acknowledgements, clarifying questions, short answers) should be evaluated as conversation, not held to the same bar as substantive deliverables.",
+    "7. If the user explicitly asked for something that conflicts with a guideline (e.g. \"give me a one-line answer\" vs. a verbosity rule), follow the user — that's not a violation.",
+    "8. Tool evidence: any call to Read/Grep/Bash/Glob/etc. that touches the relevant file or command counts as verification. Don't require a specific phrasing in the response.",
+    "9. When uncertain, pass. Corrections cost more than a missed minor issue; only flag what you are confident is wrong.",
+    "",
+    `IMPORTANT: The response may include a '${TOOL_EVIDENCE_HEADER}' section listing tool calls made during the turn. Treat these as verification evidence.`,
+    "",
+    "Behavioral guidelines (memories):",
     memoriesText,
     historySection,
     "",
     "Assistant response to check:",
     response,
     "",
-    'Respond with JSON only — no prose, no markdown fences. Exact format: {"passed": true, "feedback": ""} or {"passed": false, "feedback": "List each violated guideline and what should change"}',
+    "Output: JSON only — no prose, no markdown fences. Exact format:",
+    '  {"passed": true, "feedback": ""} when there are no clear, substantive violations',
+    '  {"passed": false, "feedback": "<for each violation: which guideline, what the assistant did, and what to change>"} only when violations are unambiguous',
   ].join("\n");
 
   if (signal?.aborted) return { passed: true, feedback: "" };
+  const rlog = log.child("review.compliance");
+  rlog.debug("prompt.full", { promptLen: prompt.length, prompt });
   let raw: string;
   try {
     raw = await callUtilityBlocking(prompt, config, { maxTokens: 600, signal });
     if (signal?.aborted) return { passed: true, feedback: "" };
-  } catch {
-    // If the reviewer fails, don't block the response.
+  } catch (err) {
+    rlog.warn("call.failed", { err });
     return { passed: true, feedback: "" };
   }
+  rlog.debug("response.raw", { rawLen: raw.length, raw });
 
   // Fail open: a reviewer that returns nothing (utility backend unavailable,
   // cancelled, or stubbed) has produced no verdict — that is not a violation.

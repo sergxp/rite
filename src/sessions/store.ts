@@ -1,9 +1,58 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "fs"
+import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync, copyFileSync } from "fs"
 import { join } from "path"
+import os from "os"
 import type { Session } from "./types.js"
+import { pathToSlug } from "../memory/paths.js"
+import { log } from "../utils/logger.js"
 
+const HOME = os.homedir()
+
+/**
+ * Sessions live under ~/.rite/sessions/<projectSlug>/<sid>.json.
+ *
+ * They used to live under <cwd>/.rite/sessions/, but that turned out to be
+ * unsafe: anything that wipes ignored files in the repo (`git clean -fdx`,
+ * antivirus quarantine, manual cleanup) silently destroyed them. Home-dir
+ * storage matches v1 behavior and survives any project-level operation.
+ */
 function sessionsDir(cwd: string): string {
+  return join(HOME, ".rite", "sessions", pathToSlug(cwd))
+}
+
+function legacySessionsDir(cwd: string): string {
   return join(cwd, ".rite", "sessions")
+}
+
+/**
+ * One-time per-project migration: copy any legacy <cwd>/.rite/sessions/*.json
+ * into ~/.rite/sessions/<projectSlug>/. We *copy* (not move) so users can
+ * verify the migration before deleting the originals — and so a failed copy
+ * never destroys data.
+ */
+let migrated = new Set<string>()
+function migrateLegacy(cwd: string): void {
+  if (migrated.has(cwd)) return
+  migrated.add(cwd)
+  const legacy = legacySessionsDir(cwd)
+  if (!existsSync(legacy)) return
+  const files = readdirSync(legacy).filter((f) => f.endsWith(".json"))
+  if (files.length === 0) return
+  const target = sessionsDir(cwd)
+  mkdirSync(target, { recursive: true })
+  let copied = 0
+  for (const f of files) {
+    const dst = join(target, f)
+    if (existsSync(dst)) continue
+    try {
+      copyFileSync(join(legacy, f), dst)
+      copied++
+    } catch {
+      // best-effort
+    }
+  }
+  if (copied > 0) {
+    log.child("sessions.store").info("legacy.migrated", { cwd, legacy, target, copied, total: files.length })
+  }
 }
 
 export function makeSessionId(): string {
@@ -37,14 +86,26 @@ export const SessionStore = {
   },
 
   async save(session: Session): Promise<void> {
+    migrateLegacy(session.workingDir)
     const dir = sessionsDir(session.workingDir)
     mkdirSync(dir, { recursive: true })
     writeFileSync(join(dir, `${session.id}.json`), JSON.stringify(session, null, 2), "utf-8")
   },
 
   async load(id: string, cwd: string): Promise<Session | null> {
+    migrateLegacy(cwd)
     const path = join(sessionsDir(cwd), `${id}.json`)
-    if (!existsSync(path)) return null
+    if (!existsSync(path)) {
+      // Fall back to legacy path if the migration somehow didn't bring it over
+      // (e.g. permission error). Better to read stale than to lose data.
+      const legacy = join(legacySessionsDir(cwd), `${id}.json`)
+      if (!existsSync(legacy)) return null
+      try {
+        return JSON.parse(readFileSync(legacy, "utf-8")) as Session
+      } catch {
+        return null
+      }
+    }
     try {
       return JSON.parse(readFileSync(path, "utf-8")) as Session
     } catch {
@@ -53,14 +114,31 @@ export const SessionStore = {
   },
 
   async list(cwd: string): Promise<Session[]> {
+    migrateLegacy(cwd)
     const dir = sessionsDir(cwd)
-    if (!existsSync(dir)) return []
     const sessions: Session[] = []
-    for (const file of readdirSync(dir).filter((f) => f.endsWith(".json"))) {
-      try {
-        sessions.push(JSON.parse(readFileSync(join(dir, file), "utf-8")) as Session)
-      } catch {
-        // skip malformed
+    const seen = new Set<string>()
+    if (existsSync(dir)) {
+      for (const file of readdirSync(dir).filter((f) => f.endsWith(".json"))) {
+        try {
+          const s = JSON.parse(readFileSync(join(dir, file), "utf-8")) as Session
+          sessions.push(s)
+          seen.add(s.id)
+        } catch {
+          // skip malformed
+        }
+      }
+    }
+    // Surface any legacy entries that weren't migrated (read-only fallback).
+    const legacy = legacySessionsDir(cwd)
+    if (existsSync(legacy)) {
+      for (const file of readdirSync(legacy).filter((f) => f.endsWith(".json"))) {
+        try {
+          const s = JSON.parse(readFileSync(join(legacy, file), "utf-8")) as Session
+          if (!seen.has(s.id)) sessions.push(s)
+        } catch {
+          // skip malformed
+        }
       }
     }
     return sessions.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
@@ -69,6 +147,11 @@ export const SessionStore = {
   async delete(id: string, cwd: string): Promise<void> {
     const path = join(sessionsDir(cwd), `${id}.json`)
     if (existsSync(path)) unlinkSync(path)
+    // Also remove the legacy copy if present, so it doesn't reappear next list.
+    const legacy = join(legacySessionsDir(cwd), `${id}.json`)
+    if (existsSync(legacy)) {
+      try { unlinkSync(legacy) } catch { /* best effort */ }
+    }
   },
 
   async rename(id: string, name: string, cwd: string): Promise<Session | null> {

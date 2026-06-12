@@ -87,8 +87,7 @@ function SessionRow(props: {
       paddingRight={1}
     >
       <text fg={props.selected ? props.theme.primary : props.theme.text}>
-        {props.selected ? "▶ " : "  "}
-        {props.label}
+        {`${props.selected ? "▶ " : "  "}${props.label}`}
       </text>
       <Show when={props.subtitle}>
         <text fg={props.theme.textMuted}>{props.subtitle}</text>

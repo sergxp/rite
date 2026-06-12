@@ -3,6 +3,7 @@ import { join } from "path";
 import { parseFrontmatter } from "../utils/frontmatter.js";
 import { getMemoryRoot, getMemoryDir, pathToSlug, slugToTier } from "./paths.js";
 import type { MemoryFile, MemoryFrontmatter } from "./types.js";
+import { log } from "../utils/logger.js";
 
 function loadMemoriesFromDir(
   dir: string,
@@ -14,20 +15,30 @@ function loadMemoriesFromDir(
   let files: string[];
   try {
     files = readdirSync(dir).filter((f) => f.endsWith(".md"));
-  } catch {
+  } catch (err) {
+    log.warn("memory.readdir.failed", { scope: "memory.reader", dir, err });
     return [];
   }
 
   const tier = slugToTier(slug, cwd);
   const memories: MemoryFile[] = [];
+  let skipped = 0;
 
   for (const file of files) {
     const filePath = join(dir, file);
     const parsed = parseFrontmatter(filePath);
-    if (!parsed) continue;
+    if (!parsed) {
+      log.warn("memory.parse.failed", { scope: "memory.reader", filePath });
+      skipped++;
+      continue;
+    }
 
     const fm = parsed.data as Partial<MemoryFrontmatter>;
-    if (!fm.name || !fm.inject) continue;
+    if (!fm.name || !fm.inject) {
+      log.warn("memory.frontmatter.incomplete", { scope: "memory.reader", filePath, hasName: !!fm.name, inject: fm.inject });
+      skipped++;
+      continue;
+    }
 
     memories.push({
       frontmatter: {
@@ -46,6 +57,7 @@ function loadMemoriesFromDir(
     });
   }
 
+  log.debug("memory.dir.loaded", { scope: "memory.reader", dir, tier, files: files.length, loaded: memories.length, skipped });
   return memories;
 }
 
@@ -89,22 +101,23 @@ export function loadMemories(cwd: string = process.cwd()): LoadedMemories {
   migrateProjectDir(cwd);
 
   const root = getMemoryRoot();
-  if (!existsSync(root)) return { always: [], semantic: [], all: [] };
+  if (!existsSync(root)) {
+    log.debug("memory.root.missing", { scope: "memory.reader", root });
+    return { always: [], semantic: [], all: [] };
+  }
 
-  // Enumerate all subdirectories of ~/.rite/memory/
   let slugs: string[];
   try {
     slugs = readdirSync(root, { withFileTypes: true })
       .filter((e) => e.isDirectory() && !e.name.startsWith("."))
       .map((e) => e.name);
-  } catch {
+  } catch (err) {
+    log.warn("memory.root.scan.failed", { scope: "memory.reader", root, err });
     return { always: [], semantic: [], all: [] };
   }
 
   const projectSlug = pathToSlug(cwd);
 
-  // Load order: global first, then project/workspace, then other project dirs.
-  // "always" injection only fires for global + project tiers.
   const all: MemoryFile[] = [];
 
   for (const slug of slugs) {
@@ -113,15 +126,22 @@ export function loadMemories(cwd: string = process.cwd()): LoadedMemories {
     all.push(...memories);
   }
 
-  // Project slug dir may not exist yet — that's fine.
-  // Ensure global and project are represented even if empty (writer handles creation).
-
   const always = all.filter(
     (m) =>
       m.frontmatter.inject === "always" &&
       (m.tier === "global" || m.tier === "project")
   );
   const semantic = all.filter((m) => m.frontmatter.inject === "semantic");
+
+  log.info("memory.loaded", {
+    scope: "memory.reader",
+    cwd,
+    projectSlug,
+    slugs: slugs.length,
+    total: all.length,
+    always: always.length,
+    semantic: semantic.length,
+  });
 
   return { always, semantic, all };
 }

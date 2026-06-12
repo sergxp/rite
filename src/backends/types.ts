@@ -9,6 +9,10 @@ export type BackendEvent =
 export interface BackendCallOpts {
   resumeSessionId?: string
   model?: string
+  /** Correlation id for this turn — surfaces in logs so a single turn can be traced. */
+  turnId?: string
+  /** Session id, attached to every log line for this call. */
+  sessionId?: string
 }
 
 export type BackendFn = (

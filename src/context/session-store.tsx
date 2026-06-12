@@ -11,7 +11,7 @@ export type DisplayItem =
   | { kind: "user"; content: string }
   | { kind: "assistant"; content: string; streaming?: boolean }
   | { kind: "thinking"; content: string }
-  | { kind: "tool"; name: string; inputJson: string; result: string; isError: boolean; durationMs: number }
+  | { kind: "tool"; name: string; inputJson: string; result: string; isError: boolean; durationMs: number; running?: boolean }
   | { kind: "system"; content: string }
 
 export function turnsToItems(turns: Turn[]): DisplayItem[] {
@@ -91,6 +91,15 @@ export const {
       )
     }
 
+    function updateItemAt(sessionId: string, index: number, updater: (item: DisplayItem) => void) {
+      setStore(
+        produce((s) => {
+          const items = s.items[sessionId]
+          if (items && index >= 0 && index < items.length) updater(items[index]!)
+        }),
+      )
+    }
+
     function setLoading(loading: boolean) {
       setStore("loading", loading)
     }
@@ -103,6 +112,7 @@ export const {
       setItems,
       appendItem,
       updateLastItem,
+      updateItemAt,
       setLoading,
     }
   },

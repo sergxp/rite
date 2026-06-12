@@ -9,6 +9,7 @@ import { runLlmStep } from "./steps/llm.js";
 import { runShellStep } from "./steps/shell.js";
 import { runConditionStep } from "./steps/condition.js";
 import { runReviewStep } from "./steps/review.js";
+import { log as riteLog } from "../utils/logger.js";
 
 export interface StepContext {
   context: string;
@@ -45,6 +46,8 @@ async function runLoopCore(
   onToolStatus?: (name: string) => void,
   signal?: AbortSignal
 ): Promise<void> {
+  const llog = riteLog.child("loops", { sessionId, loopName: loop.name });
+  llog.info("loop.start", { contextLen: context.length, stepCount: loop.steps.length });
   const memories = loadMemories();
   const stepContext: StepContext = {
     context,
@@ -56,6 +59,7 @@ async function runLoopCore(
   const steps = loop.steps;
   if (steps.length === 0) {
     log("Loop has no steps.");
+    llog.warn("loop.empty");
     return;
   }
 
@@ -64,7 +68,10 @@ async function runLoopCore(
   const reviewIterations: Record<string, number> = {};
 
   while (currentIndex < steps.length) {
-    if (signal?.aborted) break;
+    if (signal?.aborted) {
+      llog.info("loop.aborted", { atIndex: currentIndex });
+      break;
+    }
 
     const step = forceNextId
       ? findStepById(steps, forceNextId)
@@ -76,6 +83,7 @@ async function runLoopCore(
     const label = step.name ?? step.id;
     log(`\n── Step: ${label} ──────────────────`);
     onStepStart?.(step.id, label, step.type);
+    llog.info("step.start", { stepId: step.id, label, type: step.type });
 
     if (step.human_checkpoint) {
       await askUser(`Press Enter to run step "${label}", or Ctrl+C to abort: `);
@@ -164,6 +172,13 @@ async function runLoopCore(
 
     const durationMs = Date.now() - stepStartMs;
     stepContext.stepOutputs[step.id] = output;
+    llog.info("step.done", {
+      stepId: step.id,
+      type: step.type,
+      durationMs,
+      outputLen: output.length,
+      nextStepId,
+    });
 
     appendAuditEvent(sessionId, "loop_step", {
       loopName: loop.name,
@@ -190,6 +205,7 @@ async function runLoopCore(
   }
 
   log("\n✓ Loop complete.");
+  llog.info("loop.done", { stepOutputs: Object.keys(stepContext.stepOutputs).length });
 
   const allOutputs = Object.entries(stepContext.stepOutputs)
     .map(([id, out]) => `[${id}]: ${out}`)

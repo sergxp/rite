@@ -55,7 +55,7 @@ export function Footer(props: FooterProps) {
           <text fg={theme.primary}>● streaming</text>
         </Show>
         <text fg={theme.textDim}>
-          {memoryCount()} {memoryCount() === 1 ? "memory" : "memories"} · {turnCount()} turns · {props.session.backend}{model() ? ` · ${model()}` : ""}
+          {`${memoryCount()} ${memoryCount() === 1 ? "memory" : "memories"} · ${turnCount()} turns · ${props.session.backend}${model() ? ` · ${model()}` : ""}`}
         </text>
         <text fg={theme.textDim}>esc abort · q back</text>
       </box>

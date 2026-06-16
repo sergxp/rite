@@ -10,7 +10,7 @@ import type { Session, Turn } from "../sessions/types"
 export type DisplayItem =
   | { kind: "user"; content: string }
   | { kind: "assistant"; content: string; streaming?: boolean }
-  | { kind: "thinking"; content: string }
+  | { kind: "thinking"; content: string; streaming?: boolean }
   | { kind: "tool"; name: string; inputJson: string; result: string; isError: boolean; durationMs: number; running?: boolean }
   | { kind: "system"; content: string }
 

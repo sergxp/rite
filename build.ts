@@ -22,6 +22,14 @@ const result = await Bun.build({
     "@opentui/core-win32-x64",
     "@opentui/core-win32-arm64",
     "@opentui/keymap",
+    // Embeddings: @xenova/transformers loads onnxruntime-node, which ships
+    // platform-specific native .node bindings (e.g. onnxruntime_binding.node)
+    // resolved via require() relative to the package's own files. Bundling
+    // rewrites those paths into dist/index.js where the .node files don't
+    // exist, permanently breaking semantic search. Keep both external so
+    // require() resolves through node_modules at runtime.
+    "@xenova/transformers",
+    "onnxruntime-node",
   ],
 })
 

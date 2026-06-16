@@ -1,5 +1,5 @@
 import { createSignal, createEffect, createMemo, For, Show, onCleanup } from "solid-js"
-import { useKeyboard } from "@opentui/solid"
+import { useKeyboard, useTerminalDimensions } from "@opentui/solid"
 import type { TextareaRenderable, KeyEvent } from "@opentui/core"
 import { useTheme } from "../../context/theme"
 import { useConfig } from "../../context/config"
@@ -19,6 +19,7 @@ import { SessionStore } from "../../sessions/store"
 import { loadLoops, findLoop } from "../../loops/registry"
 import { runLoopTui } from "../../loops/runner"
 import { checkMemoryCompliance, TOOL_EVIDENCE_HEADER } from "../../loops/default-review"
+import { selectApplicableRules } from "../../loops/rule-selector"
 import { copyToClipboard } from "../../utils/clipboard"
 import { saveClipboardImage, nextPasteImagePath } from "../../utils/clipboard-image"
 import {
@@ -109,6 +110,7 @@ export function Composer(props: ComposerProps) {
   const store = useSessionStore()
   const route = useRoute()
   const exit = useExit()
+  const dimensions = useTerminalDimensions()
 
   const [abortController, setAbortController] = createSignal<AbortController | null>(null)
   let textareaRef: TextareaRenderable | undefined
@@ -117,6 +119,22 @@ export function Composer(props: ComposerProps) {
   let loopInputResolver: ((answer: string) => void) | null = null
 
   const [inputLines, setInputLines] = createSignal(1)
+
+  // Compute display rows for the textarea content: each explicit \n adds a
+  // row, and each line that exceeds the visible width adds soft-wrap rows.
+  // The opentui editor's virtualLineCount is clamped by viewport height so
+  // it doesn't grow on shift+Enter; we derive the row count from plainText
+  // + width so the composer expands as the user types.
+  const computeInputLines = (text: string): number => {
+    const innerWidth = Math.max(1, dimensions().width - 4) // 2 borders + 2 padding
+    if (!text) return 1
+    const lines = text.split("\n")
+    let rows = 0
+    for (const line of lines) {
+      rows += Math.max(1, Math.ceil((line.length || 0) / innerWidth))
+    }
+    return Math.max(1, rows)
+  }
 
   // Autocomplete: input value is mirrored into a signal via the textarea's
   // onContentChange event (fires on every insert AND delete).
@@ -141,6 +159,12 @@ export function Composer(props: ComposerProps) {
   createEffect(() =>
     props.onHeightChange(COMPOSER_BORDER_HEIGHT + inputLines() + suggestions().length + modelPickerRows()),
   )
+
+  // Recompute input rows when terminal width changes (long-line wrap depends on width).
+  createEffect(() => {
+    dimensions().width
+    setInputLines(Math.min(COMPOSER_MAX_INPUT_ROWS, computeInputLines(inputValue())))
+  })
 
   // When streaming ends, drain the queue FIFO, one message per turn. The
   // `draining` flag closes the async gap between popping a message and
@@ -248,7 +272,7 @@ export function Composer(props: ComposerProps) {
     if (textareaRef) {
       textareaRef.insertText(token)
       setInputValue(textareaRef.plainText ?? "")
-      setInputLines(Math.min(COMPOSER_MAX_INPUT_ROWS, Math.max(1, textareaRef.virtualLineCount ?? 1)))
+      setInputLines(Math.min(COMPOSER_MAX_INPUT_ROWS, computeInputLines(textareaRef.plainText ?? "")))
     }
     addSystem(`Image saved → ${saved}\nIncluded as a path token; the agent can read it on send.`)
   }
@@ -724,18 +748,58 @@ export function Composer(props: ComposerProps) {
       const alwaysPaths = new Set(alwaysMemories.map((m) => m.filePath))
       const dedupedSemantic = semanticHitsWithScores.filter((h) => !alwaysPaths.has(h.file.filePath))
 
+      // ── Pre-agent rule selection ─────────────────────────────────────────
+      // Default loop step 1: ask the utility LLM which candidate rules
+      // (always + semantic) actually apply to THIS request. The selected
+      // subset drives both injection and the post-response review, so the
+      // agent and the reviewer share one set of relevant rules.
+      const candidateMemories = [...alwaysMemories, ...dedupedSemantic.map((h) => h.file)]
+      let selectedMemories = candidateMemories
+      let selectionRationale = ""
+      if (candidateMemories.length > 0 && !ac.signal.aborted) {
+        props.onStatus("✻ selecting rules…")
+        try {
+          const sel = await selectApplicableRules(
+            text,
+            candidateMemories,
+            config,
+            ac.signal,
+            props.history.getTurns().slice(-6),
+          )
+          selectedMemories = sel.selected
+          selectionRationale = sel.rationale
+          tlog.info("rule.select", {
+            candidateCount: candidateMemories.length,
+            selectedCount: selectedMemories.length,
+            selected: sel.selectedNames,
+            rationale: sel.rationale,
+          })
+          if (selectedMemories.length < candidateMemories.length) {
+            const rationaleSuffix = selectionRationale ? ` — ${selectionRationale}` : ""
+            addSystem(`✓ rules: selected ${selectedMemories.length} of ${candidateMemories.length}${rationaleSuffix}`)
+          }
+        } catch (err) {
+          tlog.warn("rule.select.failed", { err })
+        }
+      }
+      const selectedPaths = new Set(selectedMemories.map((m) => m.filePath))
+      const filteredAlways = alwaysMemories.filter((m) => selectedPaths.has(m.filePath))
+      const filteredSemanticHits = semanticHits.filter((m) => selectedPaths.has(m.filePath))
+
       tlog.info("memory.injected", {
-        alwaysCount: alwaysMemories.length,
-        dedupedSemanticCount: dedupedSemantic.length,
-        always: alwaysMemories.map((m) => ({ name: m.frontmatter.name, tier: m.tier, priority: m.frontmatter.priority })),
-        semantic: dedupedSemantic.map((h) => ({ name: h.file.frontmatter.name, tier: h.file.tier, score: Number(h.score.toFixed(4)) })),
+        alwaysCount: filteredAlways.length,
+        dedupedSemanticCount: filteredSemanticHits.length,
+        always: filteredAlways.map((m) => ({ name: m.frontmatter.name, tier: m.tier, priority: m.frontmatter.priority })),
+        semantic: filteredSemanticHits.map((m) => ({ name: m.frontmatter.name, tier: m.tier })),
       })
 
       appendAuditEvent(sid, "prompt_sent", {
         userMessage: text,
+        candidateMemories: candidateMemories.map((m) => ({ name: m.frontmatter.name, tier: m.tier })),
+        selectionRationale,
         memoriesInjected: [
-          ...alwaysMemories.map((m) => ({ source: "always", name: m.frontmatter.name, tier: m.tier })),
-          ...dedupedSemantic.map((h) => ({ source: "semantic", name: h.file.frontmatter.name, tier: h.file.tier, score: h.score })),
+          ...filteredAlways.map((m) => ({ source: "always", name: m.frontmatter.name, tier: m.tier })),
+          ...filteredSemanticHits.map((m) => ({ source: "semantic", name: m.frontmatter.name, tier: m.tier })),
         ],
         historyTurnCount: props.history.length,
         backend: s.backend,
@@ -749,15 +813,15 @@ export function Composer(props: ComposerProps) {
       const tBuildStart = Date.now()
       const enriched = buildEnrichedPrompt(
         text,
-        shouldResume ? [] : alwaysMemories,
-        semanticHits,
+        shouldResume ? [] : filteredAlways,
+        filteredSemanticHits,
         props.history,
         !shouldResume,
       )
       tlog.debug("prompt.enriched", {
         enrichedLen: enriched.length,
         userLen: text.length,
-        alwaysCount: shouldResume ? 0 : alwaysMemories.length,
+        alwaysCount: shouldResume ? 0 : filteredAlways.length,
         semanticCount: semanticHits.length,
         historyTurns: props.history.length,
         shouldResume,
@@ -781,6 +845,7 @@ export function Composer(props: ComposerProps) {
 
       let streamingItemLive = false
       const toolItemIndex = new Map<string, number>()
+      let thinkingItemIndex: number | null = null
       const finishStreamingItem = () => {
         if (streamingItemLive) {
           store.updateLastItem(sid, (i) => {
@@ -800,15 +865,37 @@ export function Composer(props: ComposerProps) {
           s.claudeSessionId = id
           void SessionStore.save(s)
         },
-        onThinkingDelta: () => {
+        onThinkingDelta: (accumulated) => {
           if (ac.signal.aborted) return
           props.onStatus("✻ thinking…")
+          finishStreamingItem()
+          if (thinkingItemIndex === null) {
+            const items = store.store.items[sid] ?? []
+            thinkingItemIndex = items.length
+            store.appendItem(sid, { kind: "thinking", content: accumulated, streaming: true })
+          } else {
+            store.updateItemAt(sid, thinkingItemIndex, (i) => {
+              if (i.kind === "thinking") i.content = accumulated
+            })
+          }
         },
         onThinkingEnd: (thinking) => {
           if (ac.signal.aborted) return
           props.onStatus("")
-          finishStreamingItem()
-          store.appendItem(sid, { kind: "thinking", content: thinking })
+          if (thinkingItemIndex !== null) {
+            const idx = thinkingItemIndex
+            thinkingItemIndex = null
+            store.updateItemAt(sid, idx, (i) => {
+              if (i.kind === "thinking") {
+                i.content = thinking
+                i.streaming = false
+              }
+            })
+          } else {
+            // Drain emitted end without any deltas (defensive). Append a finalized item.
+            finishStreamingItem()
+            store.appendItem(sid, { kind: "thinking", content: thinking })
+          }
         },
         onTextDelta: (accumulated) => {
           if (ac.signal.aborted) return
@@ -923,7 +1010,7 @@ export function Composer(props: ComposerProps) {
       s.turns.push({ role: "user", content: text })
       s.turns.push({ role: "assistant", content: fullResponse })
       s.updatedAt = new Date().toISOString()
-      const usedMems = [...alwaysMemories, ...semanticHits]
+      const usedMems = selectedMemories
       const seen = new Set<string>()
       s.memoriesActive = usedMems
         .map((m) => ({ name: m.frontmatter.name, tier: m.tier, inject: m.frontmatter.inject }))
@@ -962,17 +1049,18 @@ export function Composer(props: ComposerProps) {
       }
 
       // ── Default system loop: memory-compliance review ────────────────────
-      // After every normal response, if behavioral memories were injected,
-      // check the response against them and send correction turns on failure.
+      // Step 3 of the default loop: review the response against the EXACT
+      // rules that were selected/injected in step 1. Same rule set drives
+      // injection and the compliance bar.
       if (!ac.signal.aborted) {
         await runComplianceReview({
           session: s,
           ac,
-          injectedMemories: [...alwaysMemories, ...semanticHits],
+          injectedMemories: selectedMemories,
           firstResponse: fullResponse,
           firstToolEvidence: completedToolCalls,
-          alwaysMemories,
-          semanticHits,
+          alwaysMemories: filteredAlways,
+          semanticHits: filteredSemanticHits,
           shouldResume,
         })
       }
@@ -1139,7 +1227,12 @@ export function Composer(props: ComposerProps) {
             const value = textareaRef?.plainText ?? ""
             setInputValue(value)
             setSelectedIdx(0)
-            setInputLines(Math.min(COMPOSER_MAX_INPUT_ROWS, Math.max(1, textareaRef?.virtualLineCount ?? 1)))
+            // virtualLineCount is clamped by the editor's viewport height, so
+            // it never grows past the initial 1-row size and the composer
+            // refused to expand on shift+Enter. Compute the row count from
+            // the actual text + width-aware soft-wraps so explicit newlines
+            // and long-line wraps both expand the input box.
+            setInputLines(Math.min(COMPOSER_MAX_INPUT_ROWS, computeInputLines(value)))
           }}
           onKeyDown={(key) => {
             // Enter without shift → submit; shift+Enter → newline (handled by textarea).

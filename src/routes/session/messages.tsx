@@ -103,6 +103,79 @@ function stripHorizontalRules(md: string): string {
     .replace(/\n{3,}/g, "\n\n")
 }
 
+// Convert GitHub-style markdown tables into a plain text grid so opentui's
+// markdown renderer (tree-sitter highlighter, no real table layout) doesn't
+// drop rows or render only the header. We pad each cell to the column's
+// max width and surround with spaces; the result is monospace-aligned text
+// the markdown renderer treats as a code-ish block. Idempotent on input
+// without tables.
+function flattenMarkdownTables(md: string): string {
+  const lines = md.split("\n")
+  const out: string[] = []
+  let i = 0
+  while (i < lines.length) {
+    const header = lines[i]
+    const sep = lines[i + 1]
+    const isTableLine = (l: string | undefined) => typeof l === "string" && l.indexOf("|") !== -1
+    const isSepLine = (l: string | undefined) =>
+      typeof l === "string" && /^\s*\|?\s*:?-{2,}:?(\s*\|\s*:?-{2,}:?)+\s*\|?\s*$/.test(l)
+
+    if (isTableLine(header) && isSepLine(sep)) {
+      // Collect contiguous body rows.
+      const rows: string[][] = []
+      const splitRow = (l: string): string[] =>
+        l
+          .replace(/^\s*\|/, "")
+          .replace(/\|\s*$/, "")
+          .split("|")
+          .map((c) => c.trim())
+      rows.push(splitRow(header))
+      let j = i + 2
+      while (j < lines.length && lines[j].trim() !== "" && isTableLine(lines[j])) {
+        rows.push(splitRow(lines[j]))
+        j++
+      }
+      const cols = Math.max(...rows.map((r) => r.length))
+      const widths = new Array(cols).fill(0)
+      for (const r of rows) {
+        for (let c = 0; c < cols; c++) {
+          widths[c] = Math.max(widths[c], (r[c] ?? "").length)
+        }
+      }
+      // Render a full box-drawing table inside a markdown code block so the
+      // tree-sitter highlighter preserves all whitespace perfectly.
+      const PAD = " "
+      const padCell = (cell: string, w: number) => PAD + (cell ?? "").padEnd(w, PAD) + PAD
+      const border = (left: string, mid: string, right: string) =>
+        left + widths.map((w) => "─".repeat(w + 2)).join(mid) + right
+      const formatRow = (r: string[]): string =>
+        "│" + widths.map((w, c) => padCell(r[c] ?? "", w)).join("│") + "│"
+      out.push("```text")
+      out.push(border("┌", "┬", "┐"))
+      out.push(formatRow(rows[0]))
+      out.push(border("├", "┼", "┤"))
+      for (let r = 1; r < rows.length; r++) {
+        out.push(formatRow(rows[r]))
+        if (r < rows.length - 1) {
+          out.push(border("├", "┼", "┤"))
+        }
+      }
+      out.push(border("└", "┴", "┘"))
+      out.push("```")
+      out.push("")
+      i = j
+      continue
+    }
+    out.push(lines[i])
+    i++
+  }
+  return out.join("\n")
+}
+
+function prepareMarkdown(md: string): string {
+  return flattenMarkdownTables(stripHorizontalRules(md))
+}
+
 function summarizeToolInput(inputJson: string): string {
   try {
     const input = JSON.parse(inputJson) as Record<string, unknown>
@@ -277,7 +350,7 @@ function ItemView(props: {
           </Show>
           <box paddingLeft={CONTENT_INDENT} flexDirection="column">
             <markdown
-              content={stripHorizontalRules((item as Extract<DisplayItem, { kind: "assistant" }>).content) || "…"}
+              content={prepareMarkdown((item as Extract<DisplayItem, { kind: "assistant" }>).content) || "…"}
               fg={theme.assistantMsg}
               syntaxStyle={theme.syntaxStyle}
             />
@@ -290,11 +363,28 @@ function ItemView(props: {
           <Show when={props.showRiteLabel}>
             <text fg={theme.success}><strong>Rite</strong></text>
           </Show>
-          <box paddingLeft={CONTENT_INDENT}>
-            <text fg={theme.textDim}>
-              {`✻ thought (${(item as Extract<DisplayItem, { kind: "thinking" }>).content.length} chars)`}
-            </text>
-          </box>
+          <Show
+            when={(item as Extract<DisplayItem, { kind: "thinking" }>).streaming}
+            fallback={
+              <box paddingLeft={CONTENT_INDENT}>
+                <text fg={theme.textDim}>
+                  {`✻ thought (${(item as Extract<DisplayItem, { kind: "thinking" }>).content.length} chars)`}
+                </text>
+              </box>
+            }
+          >
+            <box paddingLeft={CONTENT_INDENT} flexDirection="column">
+              <text fg={theme.textDim}>{`✻ thinking…`}</text>
+              <For
+                each={(item as Extract<DisplayItem, { kind: "thinking" }>).content
+                  .split("\n")
+                  .filter((l) => l.trim())
+                  .slice(-5)}
+              >
+                {(line) => <text fg={theme.textDim}>{line}</text>}
+              </For>
+            </box>
+          </Show>
         </box>
       </Match>
 
@@ -383,11 +473,14 @@ function ToolItemView(props: { item: Extract<DisplayItem, { kind: "tool" }> }) {
         <box flexDirection="column" paddingLeft={2}>
           <For each={visible()}>
             {(line) => (
-              <text
-                fg={line.kind === "add" ? theme.success : line.kind === "del" ? theme.error : theme.textDim}
-              >
-                {`${line.kind === "add" ? "+ " : line.kind === "del" ? "- " : "  "}${line.text}`}
-              </text>
+              <box bg={line.kind === "add" ? "#1f6f3d" : line.kind === "del" ? "#7a1d1d" : undefined}>
+                <text
+                  fg={line.kind === "ctx" ? theme.textDim : "#ffffff"}
+                  bg={line.kind === "add" ? "#1f6f3d" : line.kind === "del" ? "#7a1d1d" : undefined}
+                >
+                  {`${line.kind === "add" ? "+ " : line.kind === "del" ? "- " : "  "}${line.text}`}
+                </text>
+              </box>
             )}
           </For>
           <Show when={truncated()}>

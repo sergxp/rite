@@ -162,6 +162,38 @@ export const SessionStore = {
     return updated
   },
 
+  async fork(id: string, cwd: string): Promise<Session | null> {
+    const session = await SessionStore.load(id, cwd)
+    if (!session) return null
+    const now = new Date().toISOString()
+
+    // Create or inherit a groupId to link forks together
+    const groupId = session.groupId || session.id
+    if (!session.groupId) {
+      session.groupId = groupId
+      await SessionStore.save(session)
+    }
+
+    const forkId = `f-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
+
+    const forked: Session = {
+      ...session,
+      id: forkId,
+      name: session.name ? `${session.name} (Fork)` : "Fork",
+      createdAt: now,
+      updatedAt: now,
+      claudeSessionId: undefined, // Must start fresh Claude session to inherit history
+      groupId,
+      // Deep copy turns to prevent mutation issues
+      turns: session.turns.map(t => ({ ...t })),
+      memoriesActive: session.memoriesActive.map(m => ({ ...m })),
+      stepOutputs: session.stepOutputs ? { ...session.stepOutputs } : undefined,
+    }
+
+    await SessionStore.save(forked)
+    return forked
+  },
+
   find(idOrName: string, sessions: Session[]): Session | null {
     return (
       sessions.find((s) => s.id === idOrName) ??

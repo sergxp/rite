@@ -23,4 +23,5 @@ export interface Session {
   loopName?: string
   loopContext?: string
   stepOutputs?: Record<string, string>
+  groupId?: string
 }

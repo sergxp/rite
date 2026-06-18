@@ -22,11 +22,23 @@ const SCROLL_ACCEL = {
   reset: () => {},
 }
 
+export const MAX_RENDERED_TRANSCRIPT_ITEMS = 2
+
+export function visibleItemsForRender(items: DisplayItem[], maxItems = MAX_RENDERED_TRANSCRIPT_ITEMS): DisplayItem[] {
+  const cappedMax = Math.max(2, Math.min(MAX_RENDERED_TRANSCRIPT_ITEMS, Math.floor(maxItems)))
+  if (items.length <= cappedMax) return items
+  const hidden = items.length - (cappedMax - 1)
+  return [
+    { kind: "system", content: `Earlier transcript omitted from the live view (${hidden} items). Use /compact or session logs for full history.` },
+    ...items.slice(-(cappedMax - 1)),
+  ]
+}
+
 export function Messages(props: MessagesProps) {
   const theme = useTheme()
   const store = useSessionStore()
 
-  const items = createMemo(() => store.store.items[props.sessionId] ?? [])
+  const items = createMemo(() => visibleItemsForRender(store.store.items[props.sessionId] ?? [], props.height * 2))
 
   return (
     <scrollbox
@@ -473,7 +485,7 @@ function ToolItemView(props: { item: Extract<DisplayItem, { kind: "tool" }> }) {
         <box flexDirection="column" paddingLeft={2}>
           <For each={visible()}>
             {(line) => (
-              <box bg={line.kind === "add" ? "#1f6f3d" : line.kind === "del" ? "#7a1d1d" : undefined}>
+              <box>
                 <text
                   fg={line.kind === "ctx" ? theme.textDim : "#ffffff"}
                   bg={line.kind === "add" ? "#1f6f3d" : line.kind === "del" ? "#7a1d1d" : undefined}

@@ -1,5 +1,5 @@
-import { Show, Switch, Match, ErrorBoundary } from "solid-js"
-import { render, useTerminalDimensions } from "@opentui/solid"
+import { Switch, Match, ErrorBoundary } from "solid-js"
+import { render, useTerminalDimensions, useKeyboard, useSelectionHandler } from "@opentui/solid"
 import { createCliRenderer } from "@opentui/core"
 import { ThemeProvider } from "./context/theme"
 import { RouteProvider, useRoute } from "./context/route"
@@ -9,10 +9,33 @@ import { SessionStoreProvider } from "./context/session-store"
 import { loadConfig } from "./config/loader"
 import { ensureRiteDir } from "./utils/init"
 import { installCrashHandlers, log } from "./utils/logger"
+import { copyToClipboard } from "./utils/clipboard"
 import { Home } from "./routes/home"
 import { Session } from "./routes/session/index"
 
-function App() {
+function ErrorFallback(props: { err: unknown; exit: () => void }) {
+  useKeyboard((key) => {
+    if (key.ctrl && key.name === "c") props.exit()
+    if (key.name === "q") props.exit()
+  })
+  return (
+    <box flexDirection="column" padding={2}>
+      <text fg="red">{`⚠ Render error — see logs (${(props.err as Error)?.message ?? String(props.err)})`}</text>
+      <text fg="gray">Press Ctrl+C or q to exit.</text>
+    </box>
+  )
+}
+
+export function GlobalSelectionCopy() {
+  useSelectionHandler((selection) => {
+    const text = selection?.getSelectedText?.() ?? ""
+    if (!text.trim()) return
+    void copyToClipboard(text)
+  })
+  return null
+}
+
+export function App() {
   const dimensions = useTerminalDimensions()
   const route = useRoute()
 
@@ -22,6 +45,7 @@ function App() {
       height={dimensions().height}
       flexDirection="column"
     >
+      <GlobalSelectionCopy />
       <Switch>
         <Match when={route.data().type === "home"}>
           <Home />
@@ -66,7 +90,7 @@ export async function startApp(options: AppOptions = {}) {
   const config = await loadConfig()
   const renderer = await createCliRenderer({
     screenMode: "alternate-screen",
-    exitOnCtrlC: true,
+    exitOnCtrlC: false,
     clearOnShutdown: true,
     targetFps: 60,
     // Enable mouse button + scroll-wheel tracking so the transcript scrollbox
@@ -96,12 +120,7 @@ export async function startApp(options: AppOptions = {}) {
       <ErrorBoundary
         fallback={(err: unknown) => {
           log.error("render.boundary", { scope: "render", err })
-          return (
-            <box flexDirection="column" padding={2}>
-              <text fg="red">{`⚠ Render error — see logs (${(err as Error)?.message ?? String(err)})`}</text>
-              <text fg="gray">Press Ctrl+C to exit.</text>
-            </box>
-          )
+          return <ErrorFallback err={err} exit={() => renderer.destroy()} />
         }}
       >
         <ExitProvider exit={() => renderer.destroy()}>

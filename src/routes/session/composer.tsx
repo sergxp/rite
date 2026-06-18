@@ -14,7 +14,7 @@ import { semanticSearch } from "../../memory/embeddings"
 import { extractMemories } from "../../extraction/extractor"
 import { compressHistoryIfNeeded } from "../../history/compressor"
 import { appendAuditEvent } from "../../audit/writer"
-import { autoNameSession } from "../../sessions/namer"
+import { autoNameForkSession, autoNameSession } from "../../sessions/namer"
 import { SessionStore } from "../../sessions/store"
 import { loadLoops, findLoop } from "../../loops/registry"
 import { runLoopTui } from "../../loops/runner"
@@ -65,6 +65,7 @@ const SLASH_COMMANDS = [
   "/paste",
   "/resume",
   "/compact",
+  "/fork",
   "/loop",
   "/loop off",
   "/cron",
@@ -92,6 +93,7 @@ const HELP_TEXT = [
   "  /paste            insert clipboard image as a file path token",
   "  /resume           switch session (back to home)",
   "  /compact          compress conversation history",
+  "  /fork             create a parallel branch of the current session",
   "  /loop             list available loops",
   "  /loop <name>      run a loop",
   "  /loop off         abort the running loop",
@@ -489,6 +491,28 @@ export function Composer(props: ComposerProps) {
     }
     if (trimmed === "/copy") {
       await copyLastResponse()
+      return true
+    }
+    if (trimmed === "/fork") {
+      try {
+        const forked = await SessionStore.fork(props.session.id, process.cwd())
+        if (forked) {
+          // Parent might have been assigned a groupId, update it in the UI store
+          const parent = await SessionStore.load(props.session.id, process.cwd())
+          if (parent) store.upsertSession(parent)
+
+          store.upsertSession(forked)
+          void autoNameForkSession(forked.id, forked.turns, config, (name) => {
+            store.upsertSession({ ...forked, name })
+          })
+          addSystem(`Forked session into new branch: ${forked.name ?? "Fork"}`)
+          route.navigate({ type: "session", sessionId: forked.id })
+        } else {
+          addSystem("Failed to fork session.")
+        }
+      } catch (err) {
+        addSystem(`Failed to fork: ${(err as Error).message}`)
+      }
       return true
     }
     if (trimmed === "/paste") {
@@ -1034,7 +1058,7 @@ export function Composer(props: ComposerProps) {
 
       if (!ac.signal.aborted) {
         try {
-          await compressHistoryIfNeeded(props.history, config)
+          await compressHistoryIfNeeded(props.history, config, ac.signal, props.onStatus)
         } catch (err) {
           tlog.warn("history.compress.failed", { err })
         }

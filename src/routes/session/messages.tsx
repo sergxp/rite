@@ -1,4 +1,5 @@
-import { createMemo, For, Show, Switch, Match } from "solid-js"
+import { createMemo, createSignal, createEffect, For, Show, Switch, Match } from "solid-js"
+import { useKeyboard } from "@opentui/solid"
 import { useTheme } from "../../context/theme"
 import { useSessionStore, type DisplayItem } from "../../context/session-store"
 
@@ -22,23 +23,46 @@ const SCROLL_ACCEL = {
   reset: () => {},
 }
 
-export const MAX_RENDERED_TRANSCRIPT_ITEMS = 2
-
-export function visibleItemsForRender(items: DisplayItem[], maxItems = MAX_RENDERED_TRANSCRIPT_ITEMS): DisplayItem[] {
-  const cappedMax = Math.max(2, Math.min(MAX_RENDERED_TRANSCRIPT_ITEMS, Math.floor(maxItems)))
-  if (items.length <= cappedMax) return items
-  const hidden = items.length - (cappedMax - 1)
-  return [
-    { kind: "system", content: `Earlier transcript omitted from the live view (${hidden} items). Use /compact or session logs for full history.` },
-    ...items.slice(-(cappedMax - 1)),
-  ]
-}
+// How many display items to render in one window. Limits the native Yoga/opentui
+// layout tree size so long sessions don't leak memory into the Zig renderer.
+export const TRANSCRIPT_WINDOW_SIZE = 60
+// How many additional items to prepend each time the user presses Ctrl+U.
+export const TRANSCRIPT_LOAD_MORE_STEP = 40
 
 export function Messages(props: MessagesProps) {
   const theme = useTheme()
   const store = useSessionStore()
 
-  const items = createMemo(() => visibleItemsForRender(store.store.items[props.sessionId] ?? [], props.height * 2))
+  // Index into the full items array where our rendered window starts.
+  // Defaults to the bottom (show newest). Resets when the session changes.
+  const [windowStart, setWindowStart] = createSignal(0)
+  createEffect(() => {
+    const all = store.store.items[props.sessionId] ?? []
+    // On initial session load or when new items arrive below the window,
+    // snap windowStart to show the tail. Only reset when it would otherwise
+    // hide new items from the end (i.e. windowStart is near the new end).
+    const naturalStart = Math.max(0, all.length - TRANSCRIPT_WINDOW_SIZE)
+    setWindowStart((prev) => {
+      // If the user has scrolled up into history (prev < naturalStart - 5),
+      // keep their position so new assistant streaming doesn't jerk the view.
+      if (prev > 0 && prev < naturalStart - 5) return prev
+      return naturalStart
+    })
+  })
+
+  // Ctrl+U: load an earlier batch — extend the window backward.
+  useKeyboard((key) => {
+    if (key.ctrl && key.name === "u") {
+      setWindowStart((prev) => Math.max(0, prev - TRANSCRIPT_LOAD_MORE_STEP))
+    }
+  })
+
+  const allItems = createMemo(() => store.store.items[props.sessionId] ?? [])
+  const hiddenCount = createMemo(() => windowStart())
+  const items = createMemo(() => {
+    const all = allItems()
+    return all.slice(windowStart())
+  })
 
   return (
     <scrollbox
@@ -59,7 +83,16 @@ export function Messages(props: MessagesProps) {
       paddingRight={1}
       paddingTop={1}
     >
-      <Show when={items().length === 0}>
+      {/* Banner when earlier history is hidden: Ctrl+U loads the prev batch. */}
+      <Show when={hiddenCount() > 0}>
+        <box paddingLeft={CONTENT_INDENT} marginBottom={1}>
+          <text fg={theme.textDim}>
+            {`↑ ${hiddenCount()} earlier message${hiddenCount() === 1 ? "" : "s"} — Ctrl+U to load more`}
+          </text>
+        </box>
+      </Show>
+
+      <Show when={allItems().length === 0}>
         <box flexDirection="column" gap={1}>
           <text fg={theme.primary}><strong>Rite</strong></text>
           <text fg={theme.textMuted}>What would you like to work on?</text>

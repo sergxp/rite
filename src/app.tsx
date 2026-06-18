@@ -9,6 +9,7 @@ import { SessionStoreProvider } from "./context/session-store"
 import { loadConfig } from "./config/loader"
 import { ensureRiteDir } from "./utils/init"
 import { installCrashHandlers, log } from "./utils/logger"
+import { getEmbeddingPipeline } from "./memory/embeddings"
 import { copyToClipboard } from "./utils/clipboard"
 import { Home } from "./routes/home"
 import { Session } from "./routes/session/index"
@@ -66,6 +67,10 @@ export interface AppOptions {
 export async function startApp(options: AppOptions = {}) {
   ensureRiteDir()
   installCrashHandlers()
+  // Warm up the local embedding pipeline in the background so it's ready by
+  // the time the user finishes typing their first message. Failure is silent —
+  // semantic search already has its own disabled-flag fallback.
+  void getEmbeddingPipeline().catch(() => {})
   let claudeVersion: string | undefined
   try {
     const { execSync } = await import("child_process")

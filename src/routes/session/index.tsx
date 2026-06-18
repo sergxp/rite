@@ -110,6 +110,11 @@ export function Session() {
     if (r.type !== "session") return
     if (session()?.id === r.sessionId) return
 
+    // Free memory for the session we're leaving — keep only the tail so that
+    // returning to it doesn't re-render thousands of Yoga nodes.
+    const prev = session()
+    if (prev) store.compactItems(prev.id)
+
     if (r.sessionId) {
       const loaded = await SessionStore.load(r.sessionId, process.cwd())
       if (seq !== loadSeq) return

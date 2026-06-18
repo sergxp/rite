@@ -104,6 +104,20 @@ export const {
       setStore("loading", loading)
     }
 
+    // Retain only the tail of a session's items in memory when the session is
+    // no longer active. Frees the native Yoga layout nodes for all the trimmed
+    // items. Call when navigating away from a session that won't be rendered.
+    function compactItems(sessionId: string, keepCount = 5) {
+      setStore(
+        produce((s) => {
+          const arr = s.items[sessionId]
+          if (arr && arr.length > keepCount) {
+            s.items[sessionId] = arr.slice(-keepCount)
+          }
+        }),
+      )
+    }
+
     return {
       store,
       setSessions,
@@ -114,6 +128,7 @@ export const {
       updateLastItem,
       updateItemAt,
       setLoading,
+      compactItems,
     }
   },
 })

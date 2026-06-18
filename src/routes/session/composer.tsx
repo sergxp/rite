@@ -19,7 +19,6 @@ import { SessionStore } from "../../sessions/store"
 import { loadLoops, findLoop } from "../../loops/registry"
 import { runLoopTui } from "../../loops/runner"
 import { checkMemoryCompliance, TOOL_EVIDENCE_HEADER } from "../../loops/default-review"
-import { selectApplicableRules } from "../../loops/rule-selector"
 import { copyToClipboard } from "../../utils/clipboard"
 import { saveClipboardImage, nextPasteImagePath } from "../../utils/clipboard-image"
 import {
@@ -143,6 +142,7 @@ export function Composer(props: ComposerProps) {
   const [inputValue, setInputValue] = createSignal("")
   const [selectedIdx, setSelectedIdx] = createSignal(0)
   const suggestions = createMemo(() => (props.streaming ? [] : completionsFor(inputValue())))
+
 
   // Messages queued while a stream is in progress — drained FIFO when streaming
   // ends. An array (not a single slot) so a cron fire can't clobber a queued
@@ -751,79 +751,42 @@ export function Composer(props: ComposerProps) {
       const loaded = loadMemories()
       const alwaysMemories = loaded.always
       let semanticHits: MemoryFile[] = []
-      let semanticHitsWithScores: Array<{ file: MemoryFile; score: number }> = []
       if (loaded.semantic.length > 0) {
         props.onStatus("✻ recalling…")
         try {
-          semanticHitsWithScores = await semanticSearch(text, loaded.semantic, 5)
-          semanticHits = semanticHitsWithScores.map((h) => h.file)
+          const hits = await semanticSearch(text, loaded.semantic, 5)
+          semanticHits = hits.map((h) => h.file)
           tlog.debug("memory.semantic", {
             candidates: loaded.semantic.length,
             hits: semanticHits.length,
-            top: semanticHitsWithScores.slice(0, 5).map((h) => ({ name: h.file.frontmatter.name, score: h.score })),
+            top: hits.slice(0, 5).map((h) => ({ name: h.file.frontmatter.name, score: h.score })),
           })
         } catch (err) {
           tlog.warn("memory.semantic.failed", { err })
         }
       }
 
-      // Replicate buildEnrichedPrompt's deduplication so the audit reflects
-      // exactly what ends up in the prompt, not the raw input lists.
-      const alwaysPaths = new Set(alwaysMemories.map((m) => m.filePath))
-      const dedupedSemantic = semanticHitsWithScores.filter((h) => !alwaysPaths.has(h.file.filePath))
-
-      // ── Pre-agent rule selection ─────────────────────────────────────────
-      // Default loop step 1: ask the utility LLM which candidate rules
-      // (always + semantic) actually apply to THIS request. The selected
-      // subset drives both injection and the post-response review, so the
-      // agent and the reviewer share one set of relevant rules.
-      const candidateMemories = [...alwaysMemories, ...dedupedSemantic.map((h) => h.file)]
-      let selectedMemories = candidateMemories
-      let selectionRationale = ""
-      if (candidateMemories.length > 0 && !ac.signal.aborted) {
-        props.onStatus("✻ selecting rules…")
-        try {
-          const sel = await selectApplicableRules(
-            text,
-            candidateMemories,
-            config,
-            ac.signal,
-            props.history.getTurns().slice(-6),
-          )
-          selectedMemories = sel.selected
-          selectionRationale = sel.rationale
-          tlog.info("rule.select", {
-            candidateCount: candidateMemories.length,
-            selectedCount: selectedMemories.length,
-            selected: sel.selectedNames,
-            rationale: sel.rationale,
-          })
-          if (selectedMemories.length < candidateMemories.length) {
-            const rationaleSuffix = selectionRationale ? ` — ${selectionRationale}` : ""
-            addSystem(`✓ rules: selected ${selectedMemories.length} of ${candidateMemories.length}${rationaleSuffix}`)
-          }
-        } catch (err) {
-          tlog.warn("rule.select.failed", { err })
-        }
-      }
-      const selectedPaths = new Set(selectedMemories.map((m) => m.filePath))
-      const filteredAlways = alwaysMemories.filter((m) => selectedPaths.has(m.filePath))
-      const filteredSemanticHits = semanticHits.filter((m) => selectedPaths.has(m.filePath))
-
       tlog.info("memory.injected", {
-        alwaysCount: filteredAlways.length,
-        dedupedSemanticCount: filteredSemanticHits.length,
-        always: filteredAlways.map((m) => ({ name: m.frontmatter.name, tier: m.tier, priority: m.frontmatter.priority })),
-        semantic: filteredSemanticHits.map((m) => ({ name: m.frontmatter.name, tier: m.tier })),
+        alwaysCount: alwaysMemories.length,
+        semanticCount: semanticHits.length,
+        always: alwaysMemories.map((m) => ({ name: m.frontmatter.name, tier: m.tier })),
+        semantic: semanticHits.map((m) => ({ name: m.frontmatter.name, tier: m.tier })),
       })
+
+      if (alwaysMemories.length > 0 || semanticHits.length > 0) {
+        const parts: string[] = []
+        if (alwaysMemories.length > 0)
+          parts.push(alwaysMemories.map((m) => m.frontmatter.name).join(", "))
+        if (semanticHits.length > 0)
+          parts.push(`semantic: ${semanticHits.map((m) => m.frontmatter.name).join(", ")}`)
+        addSystem(`✓ memories: ${parts.join(" · ")}`)
+      }
 
       appendAuditEvent(sid, "prompt_sent", {
         userMessage: text,
-        candidateMemories: candidateMemories.map((m) => ({ name: m.frontmatter.name, tier: m.tier })),
-        selectionRationale,
         memoriesInjected: [
-          ...filteredAlways.map((m) => ({ source: "always", name: m.frontmatter.name, tier: m.tier })),
-          ...filteredSemanticHits.map((m) => ({ source: "semantic", name: m.frontmatter.name, tier: m.tier })),
+          ...alwaysMemories.map((m) => ({ source: "always", name: m.frontmatter.name, tier: m.tier })),
+          ...semanticHits.map((m) => ({ source: "semantic", name: m.frontmatter.name, tier: m.tier })),
         ],
         historyTurnCount: props.history.length,
         backend: s.backend,
@@ -837,15 +800,15 @@ export function Composer(props: ComposerProps) {
       const tBuildStart = Date.now()
       const enriched = buildEnrichedPrompt(
         text,
-        shouldResume ? [] : filteredAlways,
-        filteredSemanticHits,
+        shouldResume ? [] : alwaysMemories,
+        semanticHits,
         props.history,
         !shouldResume,
       )
       tlog.debug("prompt.enriched", {
         enrichedLen: enriched.length,
         userLen: text.length,
-        alwaysCount: shouldResume ? 0 : filteredAlways.length,
+        alwaysCount: shouldResume ? 0 : alwaysMemories.length,
         semanticCount: semanticHits.length,
         historyTurns: props.history.length,
         shouldResume,
@@ -1034,9 +997,8 @@ export function Composer(props: ComposerProps) {
       s.turns.push({ role: "user", content: text })
       s.turns.push({ role: "assistant", content: fullResponse })
       s.updatedAt = new Date().toISOString()
-      const usedMems = selectedMemories
       const seen = new Set<string>()
-      s.memoriesActive = usedMems
+      s.memoriesActive = [...alwaysMemories, ...semanticHits]
         .map((m) => ({ name: m.frontmatter.name, tier: m.tier, inject: m.frontmatter.inject }))
         .filter((m) => (seen.has(m.name) ? false : (seen.add(m.name), true)))
       await SessionStore.save(s)
@@ -1080,11 +1042,11 @@ export function Composer(props: ComposerProps) {
         await runComplianceReview({
           session: s,
           ac,
-          injectedMemories: selectedMemories,
+          injectedMemories: [...alwaysMemories, ...semanticHits],
           firstResponse: fullResponse,
           firstToolEvidence: completedToolCalls,
-          alwaysMemories: filteredAlways,
-          semanticHits: filteredSemanticHits,
+          alwaysMemories,
+          semanticHits,
           shouldResume,
         })
       }

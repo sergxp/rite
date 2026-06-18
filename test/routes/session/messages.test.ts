@@ -1,44 +1,90 @@
 import { describe, expect, it } from "vitest"
-import { MAX_RENDERED_TRANSCRIPT_ITEMS, visibleItemsForRender } from "../../../src/routes/session/messages"
+import { TRANSCRIPT_WINDOW_SIZE, TRANSCRIPT_LOAD_MORE_STEP } from "../../../src/routes/session/messages"
 import type { DisplayItem } from "../../../src/context/session-store"
 
-describe("visibleItemsForRender", () => {
-  it("keeps small transcripts intact", () => {
-    const items: DisplayItem[] = [
-      { kind: "user", content: "hello" },
-      { kind: "assistant", content: "hi" },
-    ]
+// Replicate the window-slice logic from the Messages component so we can
+// test the windowing behaviour without spinning up a full Solid render.
+function windowItems(
+  items: DisplayItem[],
+  windowStart: number,
+): { visible: DisplayItem[]; hiddenCount: number } {
+  return { visible: items.slice(windowStart), hiddenCount: windowStart }
+}
 
-    expect(visibleItemsForRender(items)).toEqual(items)
-  })
+function naturalStart(itemCount: number): number {
+  return Math.max(0, itemCount - TRANSCRIPT_WINDOW_SIZE)
+}
 
-  it("caps large loaded transcripts to avoid native TextBuffer exhaustion", () => {
-    const items: DisplayItem[] = Array.from({ length: 300 }, (_, i) => ({
+describe("transcript windowing", () => {
+  it("shows all items when transcript is within the window size", () => {
+    const items: DisplayItem[] = Array.from({ length: 10 }, (_, i) => ({
       kind: i % 2 === 0 ? "user" : "assistant",
       content: `turn ${i}`,
     } as DisplayItem))
 
-    const visible = visibleItemsForRender(items)
+    const start = naturalStart(items.length)
+    const { visible, hiddenCount } = windowItems(items, start)
 
-    expect(visible).toHaveLength(MAX_RENDERED_TRANSCRIPT_ITEMS)
-    expect(visible[0]).toMatchObject({
-      kind: "system",
-      content: expect.stringContaining("Earlier transcript omitted"),
-    })
-    expect(visible[1]).toEqual(items[299])
-    expect(visible.at(-1)).toEqual(items[299])
+    expect(hiddenCount).toBe(0)
+    expect(visible).toHaveLength(items.length)
+    expect(visible).toEqual(items)
   })
 
-  it("keeps at least the omission marker and latest item for tiny viewports", () => {
-    const items: DisplayItem[] = Array.from({ length: 300 }, (_, i) => ({
+  it("windows long transcripts to the tail on initial load", () => {
+    const items: DisplayItem[] = Array.from({ length: 200 }, (_, i) => ({
+      kind: i % 2 === 0 ? "user" : "assistant",
+      content: `turn ${i}`,
+    } as DisplayItem))
+
+    const start = naturalStart(items.length)
+    const { visible, hiddenCount } = windowItems(items, start)
+
+    expect(hiddenCount).toBe(200 - TRANSCRIPT_WINDOW_SIZE)
+    expect(visible).toHaveLength(TRANSCRIPT_WINDOW_SIZE)
+    expect(visible.at(-1)).toEqual(items[199])
+    expect(visible[0]).toEqual(items[hiddenCount])
+  })
+
+  it("Ctrl+U extends window backward by TRANSCRIPT_LOAD_MORE_STEP", () => {
+    const items: DisplayItem[] = Array.from({ length: 200 }, (_, i) => ({
       kind: "user",
       content: `turn ${i}`,
-    }))
+    } as DisplayItem))
 
-    const visible = visibleItemsForRender(items, 1)
+    const start = naturalStart(items.length)
 
-    expect(visible).toHaveLength(2)
-    expect(visible[1]).toEqual(items[299])
-    expect(visible.at(-1)).toEqual(items[299])
+    // Simulate one Ctrl+U press
+    const afterOne = Math.max(0, start - TRANSCRIPT_LOAD_MORE_STEP)
+    const { visible: v1, hiddenCount: h1 } = windowItems(items, afterOne)
+    expect(h1).toBe(afterOne)
+    expect(v1).toHaveLength(200 - afterOne)
+
+    // Simulate a second Ctrl+U press
+    const afterTwo = Math.max(0, afterOne - TRANSCRIPT_LOAD_MORE_STEP)
+    const { visible: v2, hiddenCount: h2 } = windowItems(items, afterTwo)
+    expect(h2).toBe(afterTwo)
+    expect(v2).toHaveLength(200 - afterTwo)
+  })
+
+  it("Ctrl+U cannot go below index 0", () => {
+    const items: DisplayItem[] = Array.from({ length: 5 }, (_, i) => ({
+      kind: "user",
+      content: `turn ${i}`,
+    } as DisplayItem))
+
+    const start = naturalStart(items.length)
+    const afterU = Math.max(0, start - TRANSCRIPT_LOAD_MORE_STEP)
+
+    expect(afterU).toBe(0)
+    const { visible, hiddenCount } = windowItems(items, afterU)
+    expect(hiddenCount).toBe(0)
+    expect(visible).toHaveLength(5)
+  })
+
+  it("TRANSCRIPT_WINDOW_SIZE and TRANSCRIPT_LOAD_MORE_STEP are reasonable values", () => {
+    expect(TRANSCRIPT_WINDOW_SIZE).toBeGreaterThanOrEqual(30)
+    expect(TRANSCRIPT_WINDOW_SIZE).toBeLessThanOrEqual(200)
+    expect(TRANSCRIPT_LOAD_MORE_STEP).toBeGreaterThan(0)
+    expect(TRANSCRIPT_LOAD_MORE_STEP).toBeLessThanOrEqual(TRANSCRIPT_WINDOW_SIZE)
   })
 })

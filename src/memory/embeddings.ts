@@ -150,7 +150,8 @@ export async function embedAndCacheMemory(
 export async function semanticSearch(
   query: string,
   candidates: MemoryFile[],
-  topN = 5
+  topN = 5,
+  precomputedQueryVector?: number[],
 ): Promise<Array<{ file: MemoryFile; score: number }>> {
   const t0 = Date.now();
   // Skip the work entirely if a prior call already established the pipeline
@@ -159,7 +160,7 @@ export async function semanticSearch(
     elog.debug("search.skipped.disabled", { candidates: candidates.length });
     return [];
   }
-  elog.debug("search.start", { queryLen: query.length, candidates: candidates.length, topN });
+  elog.debug("search.start", { queryLen: query.length, candidates: candidates.length, topN, precomputed: !!precomputedQueryVector });
   // Soft budget: if the search is still working after this many ms, abandon
   // it and return what we have. The model-loading + download path on a fresh
   // machine can take seconds, and we'd rather submit without semantic hits
@@ -171,7 +172,7 @@ export async function semanticSearch(
   }, SEARCH_BUDGET_MS);
 
   try {
-    const queryVector = await embedText(query);
+    const queryVector = precomputedQueryVector ?? await embedText(query);
 
     const scored: Array<{ file: MemoryFile; score: number }> = [];
     let skipped = 0;

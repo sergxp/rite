@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest"
-import { TRANSCRIPT_WINDOW_SIZE, TRANSCRIPT_LOAD_MORE_STEP } from "../../../src/routes/session/messages"
+import { readFileSync } from "fs"
+import { TRANSCRIPT_WINDOW_SIZE, TRANSCRIPT_LOAD_MORE_STEP, prepareMarkdown, renderMarkdownLines } from "../../../src/routes/session/messages"
 import type { DisplayItem } from "../../../src/context/session-store"
 
 // Replicate the window-slice logic from the Messages component so we can
@@ -86,5 +87,59 @@ describe("transcript windowing", () => {
     expect(TRANSCRIPT_WINDOW_SIZE).toBeLessThanOrEqual(200)
     expect(TRANSCRIPT_LOAD_MORE_STEP).toBeGreaterThan(0)
     expect(TRANSCRIPT_LOAD_MORE_STEP).toBeLessThanOrEqual(TRANSCRIPT_WINDOW_SIZE)
+  })
+})
+
+describe("assistant markdown preparation", () => {
+  it("wraps prose on word boundaries before markdown rendering", () => {
+    const md = prepareMarkdown("So the map is showing the amber banner and rendering only inventory.", 29)
+
+    expect(md).toBe([
+      "So the map is showing the",
+      "amber banner and rendering",
+      "only inventory.",
+    ].join("\n"))
+    expect(md).not.toContain("am\nber")
+  })
+
+  it("does not reflow fenced blocks", () => {
+    const md = prepareMarkdown([
+      "Before the block should wrap cleanly before amber.",
+      "```text",
+      "this code line intentionally stays longer than the wrapping width",
+      "```",
+    ].join("\n"), 25)
+
+    expect(md).toContain("Before the block should\nwrap cleanly before\namber.")
+    expect(md).toContain("this code line intentionally stays longer than the wrapping width")
+  })
+
+  it("renders bold markers as styled text instead of literal asterisks", () => {
+    const lines = renderMarkdownLines("**What's happening:** `AutoSendWorkOrderEmails` is iterating orders.", 44)
+    const first = lines[0]
+
+    expect(first.kind).toBe("text")
+    expect(first.segments?.map((s) => s.text).join("")).toContain("What's happening:")
+    expect(first.segments?.map((s) => s.text).join("")).not.toContain("**")
+    expect(first.segments?.find((s) => s.text === "What's")?.bold).toBe(true)
+    expect(first.segments?.find((s) => s.text === "happening:")?.bold).toBe(true)
+  })
+
+  it("does not split normal words after inline markdown is styled", () => {
+    const text = "**What's happening:** `AutoSendWorkOrderEmails` is iterating orders and calling `SendWorkOrderEmail` on each."
+    const rendered = renderMarkdownLines(text, 45)
+      .map((line) => line.segments?.map((s) => s.text).join("") ?? line.text ?? "")
+      .join("\n")
+
+    expect(rendered).toContain("iterating")
+    expect(rendered).not.toContain("iter\nating")
+  })
+
+  it("uses native strong nodes for visible bold rendering", () => {
+    const source = readFileSync(new URL("../../../src/routes/session/messages.tsx", import.meta.url), "utf8")
+    const inlineSegmentView = source.slice(source.indexOf("function InlineSegmentView"), source.indexOf("function ItemView"))
+
+    expect(inlineSegmentView).toContain("<strong>")
+    expect(inlineSegmentView).not.toContain("bold: true")
   })
 })

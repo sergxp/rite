@@ -12,6 +12,7 @@ import { createMemory, deleteMemory } from "./memory/writer.js"
 import { parseFrontmatter } from "./utils/frontmatter.js"
 import { loadLoops, findLoop, registerLoop } from "./loops/registry.js"
 import { SessionStore } from "./sessions/store.js"
+import { installWindowsTerminalProfileIcon } from "./utils/terminal.js"
 import type { InjectMode, MemoryType, Priority } from "./memory/types.js"
 
 const program = new Command()
@@ -25,6 +26,31 @@ program
   .option("-r, --resume <id>", "Resume a session by ID")
   .action(async (opts: { resume?: string }) => {
     await startApp({ resumeSessionId: opts.resume })
+  })
+
+// ---- terminal integration commands ----
+const terminal = program.command("terminal").description("Manage terminal integration")
+
+terminal
+  .command("setup-icon")
+  .description("Set the current Windows Terminal profile icon to Rite")
+  .option("--settings <path>", "Path to Windows Terminal settings.json")
+  .option("--profile <guid>", "Windows Terminal profile GUID (defaults to WT_PROFILE_ID)")
+  .action((opts: { settings?: string; profile?: string }) => {
+    try {
+      const result = installWindowsTerminalProfileIcon({
+        settingsPath: opts.settings,
+        profileId: opts.profile,
+      })
+      console.log(result.changed ? "Windows Terminal profile icon updated." : "Windows Terminal profile icon already set.")
+      console.log(`  Profile:  ${result.profileId}`)
+      console.log(`  Icon:     ${result.iconPath}`)
+      console.log(`  Settings: ${result.settingsPath}`)
+      console.log("Open a new tab, or wait for Windows Terminal to reload settings, to see the icon.")
+    } catch (err) {
+      console.error(`Failed to set Windows Terminal profile icon: ${(err as Error).message}`)
+      process.exit(1)
+    }
   })
 
 // ---- memory commands ----

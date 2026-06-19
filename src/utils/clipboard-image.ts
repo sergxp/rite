@@ -1,6 +1,6 @@
 import { execFile } from "child_process"
 import { existsSync, mkdirSync } from "fs"
-import { dirname } from "path"
+import { dirname, join } from "path"
 import os from "os"
 import { promisify } from "util"
 import { log } from "./logger.js"
@@ -116,9 +116,8 @@ async function saveOnLinux(outPath: string): Promise<string | null> {
 }
 
 /** Build the per-session storage path for a fresh paste. */
-export function nextPasteImagePath(sessionId: string): string {
-  const { join } = require("path") as typeof import("path")
+export function nextAttachmentImagePath(sessionId: string): string {
   const stamp = new Date().toISOString().replace(/[:.]/g, "-").replace("T", "_").slice(0, 19)
   const rand = Math.random().toString(36).slice(2, 6)
-  return join(os.homedir(), ".rite", "pastes", sessionId, `${stamp}-${rand}.png`)
+  return join(os.homedir(), ".rite", "attachments", "images", sessionId, `${stamp}-${rand}.png`)
 }

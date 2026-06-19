@@ -1,7 +1,8 @@
-import { createMemo, createSignal, createEffect, For, Show, Switch, Match } from "solid-js"
+import { createMemo, createSignal, createEffect, For, Show, Switch, Match, onCleanup } from "solid-js"
 import { useKeyboard } from "@opentui/solid"
 import { useTheme } from "../../context/theme"
 import { useSessionStore, type DisplayItem } from "../../context/session-store"
+import { registerMarkdownCopySource, unregisterMarkdownCopySource } from "../../utils/markdown-copy-source"
 
 interface MessagesProps {
   sessionId: string
@@ -12,6 +13,7 @@ interface MessagesProps {
 // Content hangs two columns under its speaker label, so each turn reads as a
 // labeled block rather than an undifferentiated wall of text.
 const CONTENT_INDENT = 2
+const TRANSCRIPT_CHROME_WIDTH = 4
 
 // Wheel sensitivity: lines scrolled per notch. opentui's default accel moves a
 // single line per notch, which feels sluggish in a long transcript. A constant
@@ -103,6 +105,8 @@ export function Messages(props: MessagesProps) {
         {(item, i) => (
           <ItemView
             item={item}
+            contentWidth={Math.max(20, props.width - CONTENT_INDENT - TRANSCRIPT_CHROME_WIDTH)}
+            copyId={`${props.sessionId}-md-${windowStart() + i()}`}
             showRiteLabel={startsTurn(items(), i())}
             turnStart={startsTurn(items(), i())}
             turnEnd={endsTurn(items(), i())}
@@ -217,8 +221,202 @@ function flattenMarkdownTables(md: string): string {
   return out.join("\n")
 }
 
-function prepareMarkdown(md: string): string {
-  return flattenMarkdownTables(stripHorizontalRules(md))
+function wrapMarkdownProse(md: string, width: number): string {
+  const safeWidth = Math.max(20, width)
+  const lines = md.split("\n")
+  const out: string[] = []
+  let inFence = false
+
+  for (const line of lines) {
+    if (/^\s*```/.test(line)) {
+      inFence = !inFence
+      out.push(line)
+      continue
+    }
+    if (inFence || line.trim() === "" || line.length <= safeWidth) {
+      out.push(line)
+      continue
+    }
+
+    const prefix = line.match(/^(\s*(?:>\s*)?(?:(?:[-*+]|\d+[.)])\s+)?)/)?.[1] ?? ""
+    const body = line.slice(prefix.length)
+    const continuation = " ".repeat(prefix.length)
+    let current = prefix
+
+    for (const word of body.split(/\s+/).filter(Boolean)) {
+      const sep = current.length > 0 && !/\s$/.test(current) ? " " : ""
+      if ((current + sep + word).length <= safeWidth) {
+        current += sep + word
+        continue
+      }
+      if (current.trim()) out.push(current)
+      current = continuation + word
+    }
+    if (current.trim()) out.push(current)
+  }
+
+  return out.join("\n")
+}
+
+export function prepareMarkdown(md: string, width = 80): string {
+  return wrapMarkdownProse(flattenMarkdownTables(stripHorizontalRules(md)), width)
+}
+
+interface InlineSegment {
+  text: string
+  bold?: boolean
+  code?: boolean
+  link?: boolean
+  listMarker?: boolean
+}
+
+interface RenderLine {
+  kind: "blank" | "code" | "text"
+  text?: string
+  segments?: InlineSegment[]
+}
+
+function displayWidth(segments: InlineSegment[]): number {
+  return segments.reduce((sum, segment) => sum + segment.text.length, 0)
+}
+
+function parseInlineMarkdown(line: string): InlineSegment[] {
+  const segments: InlineSegment[] = []
+  let i = 0
+
+  const push = (text: string, style: Omit<InlineSegment, "text"> = {}) => {
+    if (!text) return
+    const last = segments[segments.length - 1]
+    if (
+      last
+      && !!last.bold === !!style.bold
+      && !!last.code === !!style.code
+      && !!last.link === !!style.link
+      && !!last.listMarker === !!style.listMarker
+    ) {
+      last.text += text
+      return
+    }
+    segments.push({ text, ...style })
+  }
+
+  while (i < line.length) {
+    if (line.startsWith("**", i)) {
+      const end = line.indexOf("**", i + 2)
+      if (end > i + 2) {
+        push(line.slice(i + 2, end), { bold: true })
+        i = end + 2
+        continue
+      }
+    }
+    if (line[i] === "`") {
+      const end = line.indexOf("`", i + 1)
+      if (end > i + 1) {
+        push(line.slice(i + 1, end), { code: true })
+        i = end + 1
+        continue
+      }
+    }
+    if (line[i] === "[") {
+      const labelEnd = line.indexOf("]", i + 1)
+      if (labelEnd > i + 1 && line[labelEnd + 1] === "(") {
+        const urlEnd = line.indexOf(")", labelEnd + 2)
+        if (urlEnd > labelEnd + 2) {
+          push(line.slice(i + 1, labelEnd), { link: true })
+          i = urlEnd + 1
+          continue
+        }
+      }
+    }
+    push(line[i])
+    i++
+  }
+
+  return segments
+}
+
+function splitSegmentWords(segment: InlineSegment): InlineSegment[] {
+  return segment.text
+    .split(/(\s+)/)
+    .filter((text) => text.length > 0)
+    .map((text) => ({ ...segment, text }))
+}
+
+function wrapSegments(
+  segments: InlineSegment[],
+  width: number,
+  firstPrefix: InlineSegment[] = [],
+  continuationPrefix: InlineSegment[] = [],
+): InlineSegment[][] {
+  const safeWidth = Math.max(20, width)
+  const lines: InlineSegment[][] = []
+  let current = [...firstPrefix]
+
+  for (const token of segments.flatMap(splitSegmentWords)) {
+    const tokenIsSpace = /^\s+$/.test(token.text)
+    if (tokenIsSpace && displayWidth(current) === displayWidth(firstPrefix)) continue
+
+    const nextWidth = displayWidth(current) + token.text.length
+    if (!tokenIsSpace && nextWidth > safeWidth && displayWidth(current) > displayWidth(firstPrefix)) {
+      while (current.length > 0 && /^\s+$/.test(current[current.length - 1].text)) current.pop()
+      lines.push(current)
+      current = [...continuationPrefix, token]
+      continue
+    }
+    current.push(token)
+  }
+
+  while (current.length > 0 && /^\s+$/.test(current[current.length - 1].text)) current.pop()
+  if (current.length > 0) lines.push(current)
+  return lines.length > 0 ? lines : [[]]
+}
+
+function renderTextLine(line: string, width: number): RenderLine[] {
+  if (!line.trim()) return [{ kind: "blank" }]
+
+  const heading = line.match(/^\s{0,3}#{1,6}\s+(.+)$/)
+  if (heading) {
+    return wrapSegments(parseInlineMarkdown(heading[1]), width).map((segments) => ({
+      kind: "text",
+      segments: segments.map((segment) => ({ ...segment, bold: true, link: true })),
+    }))
+  }
+
+  const list = line.match(/^(\s*)((?:[-*+]|\d+[.)]))\s+(.+)$/)
+  if (list) {
+    const prefix = `${list[1]}${list[2]} `
+    const firstPrefix: InlineSegment[] = [{ text: prefix, listMarker: true }]
+    const continuationPrefix: InlineSegment[] = [{ text: " ".repeat(prefix.length) }]
+    return wrapSegments(parseInlineMarkdown(list[3]), width, firstPrefix, continuationPrefix).map((segments) => ({ kind: "text", segments }))
+  }
+
+  const quote = line.match(/^\s*>\s?(.+)$/)
+  if (quote) {
+    const prefix: InlineSegment[] = [{ text: "│ ", listMarker: true }]
+    return wrapSegments(parseInlineMarkdown(quote[1]), width, prefix, [{ text: "  " }]).map((segments) => ({ kind: "text", segments }))
+  }
+
+  return wrapSegments(parseInlineMarkdown(line), width).map((segments) => ({ kind: "text", segments }))
+}
+
+export function renderMarkdownLines(md: string, width = 80): RenderLine[] {
+  const lines = flattenMarkdownTables(stripHorizontalRules(md)).split("\n")
+  const out: RenderLine[] = []
+  let inFence = false
+
+  for (const line of lines) {
+    if (/^\s*```/.test(line)) {
+      inFence = !inFence
+      continue
+    }
+    if (inFence) {
+      out.push({ kind: "code", text: line })
+      continue
+    }
+    out.push(...renderTextLine(line, width))
+  }
+
+  return out
 }
 
 function summarizeToolInput(inputJson: string): string {
@@ -361,8 +559,29 @@ function trimContext(lines: DiffLine[]): DiffLine[] {
 
 const MAX_DIFF_RENDER_LINES = 60
 
+function InlineSegmentView(props: { segment: InlineSegment }) {
+  const theme = useTheme()
+  const style = props.segment.code
+    ? { fg: theme.toolName }
+    : props.segment.link || props.segment.listMarker
+      ? { fg: theme.info }
+      : {}
+
+  if (props.segment.bold) {
+    return (
+      <strong>
+        <span {...style}>{props.segment.text}</span>
+      </strong>
+    )
+  }
+
+  return <span {...style}>{props.segment.text}</span>
+}
+
 function ItemView(props: {
   item: DisplayItem
+  contentWidth: number
+  copyId: string
   showRiteLabel: boolean
   turnStart: boolean
   turnEnd: boolean
@@ -370,7 +589,19 @@ function ItemView(props: {
   const theme = useTheme()
   const item = props.item
 
-  return (
+  createEffect(() => {
+    if (item.kind !== "assistant") return
+    const id = props.copyId
+    registerMarkdownCopySource(id, item.content)
+    onCleanup(() => unregisterMarkdownCopySource(id))
+  })
+    const assistantLines = createMemo(() =>
+      item.kind === "assistant"
+        ? renderMarkdownLines(item.content || "…", props.contentWidth)
+        : [],
+    )
+
+    return (
     <box
       flexDirection="column"
       marginTop={props.turnStart ? 1 : 0}
@@ -393,12 +624,25 @@ function ItemView(props: {
           <Show when={props.showRiteLabel}>
             <text fg={theme.success}><strong>Rite</strong></text>
           </Show>
-          <box paddingLeft={CONTENT_INDENT} flexDirection="column">
-            <markdown
-              content={prepareMarkdown((item as Extract<DisplayItem, { kind: "assistant" }>).content) || "…"}
-              fg={theme.assistantMsg}
-              syntaxStyle={theme.syntaxStyle}
-            />
+          <box id={props.copyId} paddingLeft={CONTENT_INDENT} flexDirection="column">
+            <For each={assistantLines()}>
+              {(line) => (
+                <Show
+                  when={line.kind === "text"}
+                  fallback={
+                    <text fg={line.kind === "code" ? theme.toolOutput : theme.assistantMsg}>
+                      {line.kind === "code" ? line.text : " "}
+                    </text>
+                  }
+                >
+                  <text fg={theme.assistantMsg}>
+                    <For each={line.segments ?? []}>
+                      {(segment) => <InlineSegmentView segment={segment} />}
+                    </For>
+                  </text>
+                </Show>
+              )}
+            </For>
           </box>
         </box>
       </Match>

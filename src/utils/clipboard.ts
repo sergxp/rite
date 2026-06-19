@@ -23,7 +23,12 @@ export async function copyToClipboard(text: string): Promise<boolean> {
     if (process.platform === "darwin") {
       await execa("pbcopy", [], { input: text })
     } else if (process.platform === "win32") {
-      await execa("clip", [], { input: text })
+      await execa("powershell.exe", [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "[Console]::InputEncoding = [Text.UTF8Encoding]::new($false); $text = [Console]::In.ReadToEnd(); Set-Clipboard -Value $text",
+      ], { input: text })
     } else {
       try {
         await execa("xclip", ["-selection", "clipboard"], { input: text })

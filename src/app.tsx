@@ -11,6 +11,7 @@ import { ensureRiteDir } from "./utils/init"
 import { installCrashHandlers, log } from "./utils/logger"
 import { getEmbeddingPipeline } from "./memory/embeddings"
 import { copyToClipboard } from "./utils/clipboard"
+import { markdownCopyTextForSelection } from "./utils/markdown-copy-source"
 import { Home } from "./routes/home"
 import { Session } from "./routes/session/index"
 
@@ -29,7 +30,7 @@ function ErrorFallback(props: { err: unknown; exit: () => void }) {
 
 export function GlobalSelectionCopy() {
   useSelectionHandler((selection) => {
-    const text = selection?.getSelectedText?.() ?? ""
+    const text = selection ? (markdownCopyTextForSelection(selection) ?? selection.getSelectedText()) : ""
     if (!text.trim()) return
     void copyToClipboard(text)
   })

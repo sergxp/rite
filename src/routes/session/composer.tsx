@@ -20,7 +20,7 @@ import { loadLoops, findLoop } from "../../loops/registry"
 import { runLoopTui } from "../../loops/runner"
 import { checkMemoryCompliance, TOOL_EVIDENCE_HEADER } from "../../loops/default-review"
 import { copyToClipboard } from "../../utils/clipboard"
-import { saveClipboardImage, nextPasteImagePath } from "../../utils/clipboard-image"
+import { saveClipboardImage, nextAttachmentImagePath } from "../../utils/clipboard-image"
 import {
   attachSession as attachCron,
   detachSession as detachCron,
@@ -49,8 +49,16 @@ interface ComposerProps {
   onStatus: (text: string) => void
 }
 
+interface ReviewDraft {
+  id: string
+  feedback: string
+  prompt: string
+  memoryCount: number
+}
+
 const COMPOSER_BORDER_HEIGHT = 2 // border-top + border-bottom
 const COMPOSER_MAX_INPUT_ROWS = 8
+const REVIEW_DRAFT_ROWS = 6
 
 // Commands offered by tab/arrow autocomplete. Ordered so prefix matches list
 // the way a user expects. Keep in sync with handleSlashCommand below.
@@ -61,7 +69,6 @@ const SLASH_COMMANDS = [
   "/logs",
   "/memory",
   "/model",
-  "/paste",
   "/resume",
   "/compact",
   "/fork",
@@ -89,7 +96,7 @@ const HELP_TEXT = [
   "  /logs             show log file paths (tail -f to follow)",
   "  /memory           show loaded memories",
   "  /model            show or switch model (claude backend only)",
-  "  /paste            insert clipboard image as a file path token",
+  "  alt+v             insert clipboard image as a file path token",
   "  /resume           switch session (back to home)",
   "  /compact          compress conversation history",
   "  /fork             create a parallel branch of the current session",
@@ -154,12 +161,14 @@ export function Composer(props: ComposerProps) {
   // drive selection. Escape closes without changing.
   const [modelPickerOpen, setModelPickerOpen] = createSignal(false)
   const [modelPickerIdx, setModelPickerIdx] = createSignal(0)
+  const [reviewDraft, setReviewDraft] = createSignal<ReviewDraft | null>(null)
   // Header (1) + N model rows + footer hint (1)
   const modelPickerRows = () => (modelPickerOpen() ? CLAUDE_MODELS.length + 2 : 0)
+  const reviewDraftRows = () => (reviewDraft() ? REVIEW_DRAFT_ROWS : 0)
 
   // Grow the composer to fit the current input lines + suggestions + picker.
   createEffect(() =>
-    props.onHeightChange(COMPOSER_BORDER_HEIGHT + inputLines() + suggestions().length + modelPickerRows()),
+    props.onHeightChange(COMPOSER_BORDER_HEIGHT + inputLines() + suggestions().length + modelPickerRows() + reviewDraftRows()),
   )
 
   // Recompute input rows when terminal width changes (long-line wrap depends on width).
@@ -218,7 +227,11 @@ export function Composer(props: ComposerProps) {
     if (await handleSlashCommand(prompt)) return
     await submit(prompt)
   })
-  onCleanup(() => detachCron(props.session.id))
+  let disposed = false
+  onCleanup(() => {
+    disposed = true
+    detachCron(props.session.id)
+  })
 
   // Track model picker open/close.
   createEffect(() => {
@@ -245,6 +258,33 @@ export function Composer(props: ComposerProps) {
     store.appendItem(sessionId(), { kind: "system", content })
   }
 
+  function editReviewDraft() {
+    const draft = reviewDraft()
+    if (!draft || !textareaRef) return
+    textareaRef.setText(draft.prompt)
+    textareaRef.cursorOffset = draft.prompt.length
+    setInputValue(draft.prompt)
+    setInputLines(Math.min(COMPOSER_MAX_INPUT_ROWS, computeInputLines(draft.prompt)))
+    setReviewDraft(null)
+  }
+
+  function sendReviewDraft() {
+    const draft = reviewDraft()
+    if (!draft) return
+    setReviewDraft(null)
+    if (props.streaming) {
+      enqueueMessage(draft.prompt)
+      addSystem("Queued background review follow-up.")
+      return
+    }
+    void submit(draft.prompt)
+  }
+
+  function reviewSummary(draft: ReviewDraft): string {
+    const singleLine = draft.feedback.replace(/\s+/g, " ").trim()
+    return singleLine.length > 110 ? `${singleLine.slice(0, 107)}...` : singleLine
+  }
+
   async function copyLastResponse() {
     const items = store.store.items[sessionId()] ?? []
     const last = [...items].reverse().find((i) => i.kind === "assistant")
@@ -258,12 +298,12 @@ export function Composer(props: ComposerProps) {
 
   async function pasteClipboardImage() {
     const sid = props.session.id
-    const target = nextPasteImagePath(sid)
+    const target = nextAttachmentImagePath(sid)
     props.onStatus("✻ pasting image…")
     const saved = await saveClipboardImage(target)
     props.onStatus("")
     if (!saved) {
-      addSystem("No image found on the clipboard. Copy a screenshot first, then run /paste.")
+      addSystem("No image found on the clipboard. Copy a screenshot first, then press Alt+V.")
       log.info("paste.image.empty", { sessionId: sid, scope: "composer" })
       return
     }
@@ -276,7 +316,7 @@ export function Composer(props: ComposerProps) {
       setInputValue(textareaRef.plainText ?? "")
       setInputLines(Math.min(COMPOSER_MAX_INPUT_ROWS, computeInputLines(textareaRef.plainText ?? "")))
     }
-    addSystem(`Image saved → ${saved}\nIncluded as a path token; the agent can read it on send.`)
+    addSystem(`Image attached → ${saved}\nIncluded as a path token; keep typing or press Alt+V again to add more.`)
   }
 
   // ---- /cron (scheduled prompts) --------------------------------------------
@@ -515,10 +555,6 @@ export function Composer(props: ComposerProps) {
       }
       return true
     }
-    if (trimmed === "/paste") {
-      await pasteClipboardImage()
-      return true
-    }
     if (trimmed === "/logs") {
       const { logPath, sessionLogPath, getLogLevel } = await import("../../utils/logger")
       const lines = [
@@ -556,7 +592,7 @@ export function Composer(props: ComposerProps) {
       addSystem(
         loops.length
           ? `Available loops:\n${loops.map((l) => `  ${l.name}${l.description ? ` — ${l.description}` : ""}`).join("\n")}\nRun one with /loop <name>`
-          : "No loops found. Add YAML loop files to .rite/loops/",
+          : "No loops found. Add JSON loop files to .rite/loops/",
       )
       return true
     }
@@ -594,144 +630,52 @@ export function Composer(props: ComposerProps) {
   }
 
   /**
-   * Default system loop: after a normal turn, review the response against the
-   * injected behavioral memories and, on failure, send up to 2 correction
-   * turns (3 review passes total). Corrections feed the rolling history and
-   * the transcript but are not persisted as user/assistant session turns —
-   * they're Rite self-correcting, not new exchanges (matches v1). The reviewer
-   * runs on the utility backend; any failure is swallowed so it never blocks
-   * or corrupts a delivered response.
+   * Background review: after a normal turn, review the delivered response
+   * against injected behavioral memories. Findings become a user-controlled
+   * draft card; Rite never sends the review back to the agent automatically.
    */
-  async function runComplianceReview(opts: {
+  async function runComplianceReviewDraft(opts: {
     session: Session
     ac: AbortController
     injectedMemories: MemoryFile[]
-    firstResponse: string
-    firstToolEvidence: string[]
-    alwaysMemories: MemoryFile[]
-    semanticHits: MemoryFile[]
-    shouldResume: boolean
+    response: string
+    toolEvidence: string[]
   }) {
     const { session: s, ac, injectedMemories } = opts
     if (injectedMemories.length === 0) return
     const rlog = log.child("review", { sessionId: s.id })
-    rlog.info("review.start", { memoryCount: injectedMemories.length, responseLen: opts.firstResponse.length, toolEvidence: opts.firstToolEvidence.length })
+    rlog.info("review.start.background", { memoryCount: injectedMemories.length, responseLen: opts.response.length, toolEvidence: opts.toolEvidence.length })
 
-    let lastResponse = opts.firstResponse
-    let toolEvidence = opts.firstToolEvidence
+    const responseWithTools =
+      opts.toolEvidence.length > 0
+        ? `${opts.response}\n\n${TOOL_EVIDENCE_HEADER}\n${opts.toolEvidence.join("\n")}`
+        : opts.response
 
-    for (let attempt = 0; attempt < 3; attempt++) {
-      if (ac.signal.aborted) return
-
-      props.onStatus("✻ reviewing…")
-      const responseWithTools =
-        toolEvidence.length > 0
-          ? `${lastResponse}\n\n${TOOL_EVIDENCE_HEADER}\n${toolEvidence.join("\n")}`
-          : lastResponse
-
-      let review
-      try {
-        review = await checkMemoryCompliance(
-          responseWithTools,
-          injectedMemories,
-          config,
-          ac.signal,
-          props.history.getTurns().slice(-6),
-        )
-      } catch (err) {
-        rlog.warn("review.failed", { attempt, err })
-        props.onStatus("")
-        return
-      }
-      rlog.info("review.result", { attempt, passed: review.passed, feedbackLen: review.feedback?.length ?? 0 })
-      if (ac.signal.aborted) {
-        props.onStatus("")
-        return
-      }
-      if (review.passed) {
-        if (attempt === 0) {
-          addSystem(`✓ review (compliance): passed — ${injectedMemories.length} memor${injectedMemories.length === 1 ? "y" : "ies"} checked`)
-        } else {
-          addSystem(`✓ review (compliance): passed after ${attempt} correction${attempt === 1 ? "" : "s"}`)
-        }
-        props.onStatus("")
-        return
-      }
-
-      // Surface the reviewer's findings as a system notice.
-      addSystem(`→ review (compliance): revising to follow memory guidelines\n${review.feedback}`)
-
-      // Last allowed pass — report the unresolved issues and stop.
-      if (attempt === 2) {
-        addSystem(`Memory compliance unresolved after 3 attempts.\nPersistent issues:\n${review.feedback}`)
-        props.onStatus("")
-        return
-      }
-
-      // Correction turn: injected into history but not shown as a user message.
-      props.onStatus(`✻ correcting (${attempt + 1})…`)
-      const correctionMsg = `Please revise your previous response to correctly follow these memory guidelines:\n\n${review.feedback}\n\nProvide the corrected response only.`
-      const correctionEnriched = buildEnrichedPrompt(
-        correctionMsg,
-        opts.shouldResume ? [] : opts.alwaysMemories,
-        opts.semanticHits,
-        props.history,
-        !opts.shouldResume,
+    try {
+      const review = await checkMemoryCompliance(
+        responseWithTools,
+        injectedMemories,
+        config,
+        ac.signal,
+        props.history.getTurns().slice(-6),
       )
+      rlog.info("review.result.background", { passed: review.passed, feedbackLen: review.feedback?.length ?? 0 })
+      if (disposed || ac.signal.aborted || review.passed || !review.feedback.trim()) return
 
-      const sid = s.id
-      let streamingLive = false
-      let corrected
-      try {
-        corrected = await drainAgentStream(
-          getBackend(s.backend)(correctionEnriched, ac.signal, {
-            resumeSessionId: opts.shouldResume ? s.claudeSessionId : undefined,
-          }),
-          {
-            onSessionId: (id) => {
-              s.claudeSessionId = id
-              void SessionStore.save(s)
-            },
-            // Stream the corrected text into a new assistant bubble. Tool and
-            // thinking activity during a correction are evidence only (captured
-            // via the return value), not rendered as separate items.
-            onTextDelta: (accumulated) => {
-              if (!streamingLive) {
-                store.appendItem(sid, { kind: "assistant", content: "", streaming: true })
-                streamingLive = true
-              }
-              store.updateLastItem(sid, (i) => {
-                if (i.kind === "assistant") i.content = accumulated
-              })
-            },
-          },
-        )
-      } catch {
-        props.onStatus("")
-        return
-      }
-      if (streamingLive) {
-        store.updateLastItem(sid, (i) => {
-          if (i.kind === "assistant") i.streaming = false
-        })
-      }
-
-      const correctedResponse = corrected.text
-      if (!correctedResponse.trim()) {
-        props.onStatus("")
-        return
-      }
-
-      // Feed the rolling history so later turns have the corrected context.
-      props.history.add("user", correctionMsg)
-      props.history.add("assistant", correctedResponse)
-      s.updatedAt = new Date().toISOString()
-      void SessionStore.save(s)
-
-      lastResponse = correctedResponse
-      toolEvidence = corrected.completedToolCalls
+      const prompt = [
+        "Please revise your previous response to address this background review.",
+        "",
+        review.feedback.trim(),
+      ].join("\n")
+      setReviewDraft({
+        id: `review-${Date.now().toString(36)}`,
+        feedback: review.feedback.trim(),
+        prompt,
+        memoryCount: injectedMemories.length,
+      })
+    } catch (err) {
+      rlog.warn("review.failed.background", { err })
     }
-    props.onStatus("")
   }
 
   async function submit(text: string) {
@@ -1034,20 +978,16 @@ export function Composer(props: ComposerProps) {
         }, sid).catch((err) => tlog.warn("memory.extract.failed", { err }))
       }
 
-      // ── Default system loop: memory-compliance review ────────────────────
-      // Step 3 of the default loop: review the response against the EXACT
-      // rules that were selected/injected in step 1. Same rule set drives
-      // injection and the compliance bar.
+      // ── Background memory-compliance review ──────────────────────────────
+      // Review uses the same rule set that was injected, but findings remain
+      // user-controlled drafts instead of automatic correction turns.
       if (!ac.signal.aborted) {
-        await runComplianceReview({
+        void runComplianceReviewDraft({
           session: s,
           ac,
           injectedMemories: [...alwaysMemories, ...semanticHits],
-          firstResponse: fullResponse,
-          firstToolEvidence: completedToolCalls,
-          alwaysMemories,
-          semanticHits,
-          shouldResume,
+          response: fullResponse,
+          toolEvidence: completedToolCalls,
         })
       }
     } catch (err: unknown) {
@@ -1093,6 +1033,27 @@ export function Composer(props: ComposerProps) {
       pickerOpen: modelPickerOpen(),
       suggestions: suggestions().length,
     })
+    if (!props.streaming && key.meta && key.name === "v") {
+      key.preventDefault()
+      void pasteClipboardImage()
+      return
+    }
+    if (reviewDraft() && key.meta && key.name === "s") {
+      key.preventDefault()
+      sendReviewDraft()
+      return
+    }
+    if (reviewDraft() && key.meta && key.name === "e") {
+      key.preventDefault()
+      editReviewDraft()
+      return
+    }
+    if (reviewDraft() && key.meta && key.name === "d") {
+      key.preventDefault()
+      setReviewDraft(null)
+      return
+    }
+
     // Autocomplete navigation takes priority and consumes the key (preventDefault
     // runs before the input's own handler — see InputRenderable dispatch order).
     if (suggestions().length > 0) {
@@ -1175,7 +1136,7 @@ export function Composer(props: ComposerProps) {
   }
 
   return (
-    <box flexDirection="column" height={COMPOSER_BORDER_HEIGHT + inputLines() + suggestions().length + modelPickerRows()}>
+    <box flexDirection="column" height={COMPOSER_BORDER_HEIGHT + inputLines() + suggestions().length + modelPickerRows() + reviewDraftRows()}>
       <Show when={modelPickerOpen()}>
         <box flexDirection="column" paddingLeft={2}>
           <text fg={theme.textMuted}>Select model (↑↓ navigate · ↵ pick · esc cancel):</text>
@@ -1188,6 +1149,23 @@ export function Composer(props: ComposerProps) {
           </For>
           <text fg={theme.textDim}> </text>
         </box>
+      </Show>
+
+      <Show when={reviewDraft()}>
+        {(draft) => (
+          <box flexDirection="column" height={REVIEW_DRAFT_ROWS} borderStyle="single" borderColor={theme.warning} paddingLeft={1} paddingRight={1}>
+            <text fg={theme.warning}>{`Review found suggestions (${draft().memoryCount} memor${draft().memoryCount === 1 ? "y" : "ies"})`}</text>
+            <text fg={theme.textMuted}>{reviewSummary(draft())}</text>
+            <text fg={theme.textDim}>No message was sent to the agent.</text>
+            <box flexDirection="row">
+              <text fg={theme.primary} onMouseDown={sendReviewDraft}>[ Alt+S Send ]</text>
+              <text fg={theme.textDim}> </text>
+              <text fg={theme.primary} onMouseDown={editReviewDraft}>[ Alt+E Edit ]</text>
+              <text fg={theme.textDim}> </text>
+              <text fg={theme.textMuted} onMouseDown={() => setReviewDraft(null)}>[ Alt+D Dismiss ]</text>
+            </box>
+          </box>
+        )}
       </Show>
 
       <box

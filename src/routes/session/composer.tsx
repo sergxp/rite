@@ -511,6 +511,38 @@ export function Composer(props: ComposerProps) {
     }
   }
 
+  function makeLoopToolCallbacks(sid: string) {
+    const toolItemIndex = new Map<string, number>()
+    const startedAt = new Map<string, number>()
+    return {
+      onToolCall: (name: string, id: string) => {
+        props.onStatus(`⏳ ${name}`)
+        startedAt.set(id, Date.now())
+        const items = store.store.items[sid] ?? []
+        toolItemIndex.set(id, items.length)
+        store.appendItem(sid, { kind: "tool", name, inputJson: "", result: "", isError: false, durationMs: 0, running: true })
+      },
+      onToolDone: (name: string, id: string, inputJson: string) => {
+        const idx = toolItemIndex.get(id)
+        if (idx !== undefined) {
+          store.updateItemAt(sid, idx, (i) => { if (i.kind === "tool") i.inputJson = inputJson })
+        }
+      },
+      onToolResult: (id: string, result: string, isError: boolean) => {
+        props.onStatus("")
+        const idx = toolItemIndex.get(id)
+        toolItemIndex.delete(id)
+        const dur = Date.now() - (startedAt.get(id) ?? Date.now())
+        startedAt.delete(id)
+        if (idx !== undefined) {
+          store.updateItemAt(sid, idx, (i) => {
+            if (i.kind === "tool") { i.result = result; i.isError = isError; i.durationMs = dur; i.running = false }
+          })
+        }
+      },
+    }
+  }
+
   async function runLoop(name: string, context: string) {
     const loops = loadLoops()
     const loop = findLoop(name)
@@ -523,6 +555,7 @@ export function Composer(props: ComposerProps) {
     setAbortController(ac)
     props.onStreamStart()
     addSystem(`Running loop: ${loop.name}`)
+    const sid = sessionId()
     try {
       await runLoopTui(loop, context, config, {
         onMessage: (text) => addSystem(text),
@@ -533,20 +566,21 @@ export function Composer(props: ComposerProps) {
           }),
         onStepStart: (stepId, label, type, stepIndex, stepTotal) => {
           props.onStatus(`⏳ ${label} (${type})`)
-          store.appendItem(sessionId(), { kind: "loop-step", loopName: loop.name, stepId, stepLabel: label, stepType: type, stepIndex, stepTotal })
+          store.appendItem(sid, { kind: "loop-step", loopName: loop.name, stepId, stepLabel: label, stepType: type, stepIndex, stepTotal })
         },
         onToken: (text) => {
-          const items = store.store.items[sessionId()] ?? []
+          const items = store.store.items[sid] ?? []
           const last = items[items.length - 1]
           if (last?.kind === "assistant" && last.streaming) {
-            store.updateLastItem(sessionId(), (i) => {
+            store.updateLastItem(sid, (i) => {
               if (i.kind === "assistant") i.content += text
             })
           } else {
-            store.appendItem(sessionId(), { kind: "assistant", content: text, streaming: true })
+            store.appendItem(sid, { kind: "assistant", content: text, streaming: true })
           }
         },
         onToolStatus: (name) => props.onStatus(`⏳ ${name}`),
+        ...makeLoopToolCallbacks(sid),
       }, ac.signal)
     } catch (err) {
       addSystem(`Loop failed: ${(err as Error).message}`)
@@ -1042,6 +1076,7 @@ export function Composer(props: ComposerProps) {
           const loop = findLoop(activeLoopName)
           if (loop) {
             tlog.info("loop.mode.fire", { loopName: activeLoopName })
+            const loopSid = sid
             void runLoopTui(loop, `${text}\n\n---\n\nAgent response:\n${fullResponse}`, config, {
               onMessage: (msg) => addSystem(msg),
               waitForInput: (prompt) => new Promise((resolve) => {
@@ -1050,20 +1085,21 @@ export function Composer(props: ComposerProps) {
               }),
               onStepStart: (stepId, label, type, stepIndex, stepTotal) => {
                 props.onStatus(`⟳ ${label} (${type})`)
-                store.appendItem(sessionId(), { kind: "loop-step", loopName: loop.name, stepId, stepLabel: label, stepType: type, stepIndex, stepTotal })
+                store.appendItem(loopSid, { kind: "loop-step", loopName: loop.name, stepId, stepLabel: label, stepType: type, stepIndex, stepTotal })
               },
               onToken: (tok) => {
-                const items = store.store.items[sessionId()] ?? []
+                const items = store.store.items[loopSid] ?? []
                 const last = items[items.length - 1]
                 if (last?.kind === "assistant" && last.streaming) {
-                  store.updateLastItem(sessionId(), (i) => {
+                  store.updateLastItem(loopSid, (i) => {
                     if (i.kind === "assistant") i.content += tok
                   })
                 } else {
-                  store.appendItem(sessionId(), { kind: "assistant", content: tok, streaming: true })
+                  store.appendItem(loopSid, { kind: "assistant", content: tok, streaming: true })
                 }
               },
               onToolStatus: (name) => props.onStatus(`⏳ ${name}`),
+              ...makeLoopToolCallbacks(loopSid),
             }, ac.signal).then(() => props.onStatus("")).catch(() => {})
           } else {
             addSystem(`Loop "${activeLoopName}" no longer found — run /loop to pick another or /loop off to disable.`)

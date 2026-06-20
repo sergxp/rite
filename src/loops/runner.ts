@@ -24,6 +24,9 @@ export interface LoopCallbacks {
   onStepStart?(stepId: string, stepLabel: string, stepType: string, stepIndex: number, stepTotal: number): void;
   onToken?(text: string): void;
   onToolStatus?(name: string): void;
+  onToolCall?(name: string, id: string): void;
+  onToolDone?(name: string, id: string, inputJson: string): void;
+  onToolResult?(id: string, result: string, isError: boolean): void;
 }
 
 function findStepById(steps: Step[], id: string): Step | undefined {
@@ -44,6 +47,9 @@ async function runLoopCore(
   onStepStart?: (stepId: string, stepLabel: string, stepType: string, stepIndex: number, stepTotal: number) => void,
   onToken?: (text: string) => void,
   onToolStatus?: (name: string) => void,
+  onToolCall?: (name: string, id: string) => void,
+  onToolDone?: (name: string, id: string, inputJson: string) => void,
+  onToolResult?: (id: string, result: string, isError: boolean) => void,
   signal?: AbortSignal
 ): Promise<void> {
   const llog = riteLog.child("loops", { sessionId, loopName: loop.name });
@@ -99,6 +105,9 @@ async function runLoopCore(
         const result = await runLlmStep(step, stepContext, {
           onToken,
           onToolStatus,
+          onToolCall,
+          onToolDone,
+          onToolResult,
           signal,
         });
         output = result.output;
@@ -257,7 +266,7 @@ export async function runLoop(
   const onToolStatus = (name: string) => process.stdout.write(`\n[tool: ${name}]\n`);
   await runLoopCore(
     loop, context, config, sessionId, console.log, askUser,
-    undefined, onToken, onToolStatus
+    undefined, onToken, onToolStatus, undefined, undefined, undefined
   );
 }
 
@@ -276,6 +285,9 @@ export async function runLoopTui(
     callbacks.onStepStart,
     callbacks.onToken,
     callbacks.onToolStatus,
+    callbacks.onToolCall,
+    callbacks.onToolDone,
+    callbacks.onToolResult,
     signal
   );
 }

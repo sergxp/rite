@@ -14,6 +14,9 @@ export async function runLlmStep(
   options?: {
     onToken?: (text: string) => void;
     onToolStatus?: (name: string) => void;
+    onToolCall?: (name: string, id: string) => void;
+    onToolDone?: (name: string, id: string, inputJson: string) => void;
+    onToolResult?: (id: string, result: string, isError: boolean) => void;
     signal?: AbortSignal;
   }
 ): Promise<LlmStepResult> {
@@ -34,6 +37,11 @@ export async function runLlmStep(
       output += event.content;
     } else if (event.type === "tool_call") {
       options?.onToolStatus?.(event.name);
+      options?.onToolCall?.(event.name, event.id);
+    } else if (event.type === "tool_done") {
+      options?.onToolDone?.(event.name, event.id, event.inputJson);
+    } else if (event.type === "tool_result") {
+      options?.onToolResult?.(event.id, event.result, event.isError);
     }
   }
 

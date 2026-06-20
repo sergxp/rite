@@ -1200,6 +1200,13 @@ export function Composer(props: ComposerProps) {
     // Abort commands must work while a loop is streaming.
     if (text === "/loop off" || text === "/loop stop") {
       abortController()?.abort()
+      if (props.session.activeLoop) {
+        const prev = props.session.activeLoop
+        props.session.activeLoop = undefined
+        SessionStore.save(props.session).catch(() => {})
+        store.upsertSession({ ...props.session })
+        addSystem(`Loop mode off (was: ${prev}). Default system loop restored.`)
+      }
       return
     }
     // While streaming, queue the message and show a hint — it will fire automatically

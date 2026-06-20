@@ -166,9 +166,15 @@ export function Composer(props: ComposerProps) {
   const modelPickerRows = () => (modelPickerOpen() ? CLAUDE_MODELS.length + 2 : 0)
   const reviewDraftRows = () => (reviewDraft() ? REVIEW_DRAFT_ROWS : 0)
 
+  // Loop picker state — same pattern as model picker.
+  const [loopPickerOpen, setLoopPickerOpen] = createSignal(false)
+  const [loopPickerIdx, setLoopPickerIdx] = createSignal(0)
+  const [loopPickerItems, setLoopPickerItems] = createSignal<import("../../loops/types").Loop[]>([])
+  const loopPickerRows = () => (loopPickerOpen() ? loopPickerItems().length + 2 : 0)
+
   // Grow the composer to fit the current input lines + suggestions + picker.
   createEffect(() =>
-    props.onHeightChange(COMPOSER_BORDER_HEIGHT + inputLines() + suggestions().length + modelPickerRows() + reviewDraftRows()),
+    props.onHeightChange(COMPOSER_BORDER_HEIGHT + inputLines() + suggestions().length + modelPickerRows() + loopPickerRows() + reviewDraftRows()),
   )
 
   // Recompute input rows when terminal width changes (long-line wrap depends on width).
@@ -249,6 +255,20 @@ export function Composer(props: ComposerProps) {
       commitModelPick()
     } else if (key.name === "escape") {
       setModelPickerOpen(false)
+    }
+  })
+
+  // Drive the loop picker — same pattern as model picker.
+  useKeyboard((key) => {
+    if (!loopPickerOpen()) return
+    if (key.name === "up") {
+      setLoopPickerIdx((i) => Math.max(0, i - 1))
+    } else if (key.name === "down") {
+      setLoopPickerIdx((i) => Math.min(loopPickerItems().length - 1, i + 1))
+    } else if (key.name === "return") {
+      commitLoopPick()
+    } else if (key.name === "escape") {
+      setLoopPickerOpen(false)
     }
   })
 
@@ -398,6 +418,27 @@ export function Composer(props: ComposerProps) {
       (m) => `${m.frontmatter.name}  [${m.tier} · ${m.frontmatter.inject}]`,
     )
     addSystem(`Loaded ${loaded.all.length} memorie(s):\n${lines.join("\n")}`)
+  }
+
+  function openLoopPicker() {
+    const loops = loadLoops()
+    if (loops.length === 0) {
+      addSystem("No loops found. Add JSON loop files to ~/.rite/loops/ or .rite/loops/")
+      return
+    }
+    setLoopPickerItems(loops)
+    setLoopPickerIdx(0)
+    setLoopPickerOpen(true)
+  }
+
+  function commitLoopPick() {
+    const loop = loopPickerItems()[loopPickerIdx()]
+    setLoopPickerOpen(false)
+    if (!loop) return
+    props.session.activeLoop = loop.name
+    SessionStore.save(props.session).catch(() => {})
+    store.upsertSession({ ...props.session })
+    addSystem(`Loop mode: ${loop.name}${loop.description ? ` — ${loop.description}` : ""}\nDefault system loop disabled. Run /loop off to return to normal.`)
   }
 
   function openModelPicker() {
@@ -585,22 +626,32 @@ export function Composer(props: ComposerProps) {
     }
     if (trimmed === "/loop off" || trimmed === "/loop stop") {
       abortController()?.abort()
+      if (props.session.activeLoop) {
+        const prev = props.session.activeLoop
+        props.session.activeLoop = undefined
+        SessionStore.save(props.session).catch(() => {})
+        store.upsertSession({ ...props.session })
+        addSystem(`Loop mode off (was: ${prev}). Default system loop restored.`)
+      }
       return true
     }
     if (trimmed === "/loop") {
-      const loops = loadLoops()
-      addSystem(
-        loops.length
-          ? `Available loops:\n${loops.map((l) => `  ${l.name}${l.description ? ` — ${l.description}` : ""}`).join("\n")}\nRun one with /loop <name>`
-          : "No loops found. Add JSON loop files to .rite/loops/",
-      )
+      openLoopPicker()
       return true
     }
     if (trimmed.startsWith("/loop ")) {
-      // /loop <name> [context…] — everything after the name seeds the loop.
-      const rest = trimmed.slice("/loop ".length).trim()
-      const [name, ...ctx] = rest.split(/\s+/)
-      void runLoop(name ?? "", ctx.join(" "))
+      // /loop <name> — set loop mode directly by name
+      const name = trimmed.slice("/loop ".length).trim()
+      const loop = findLoop(name)
+      if (!loop) {
+        const loops = loadLoops()
+        addSystem(`Loop not found: "${name}"\nAvailable: ${loops.map((l) => l.name).join(", ") || "(none)"}`)
+      } else {
+        props.session.activeLoop = loop.name
+        SessionStore.save(props.session).catch(() => {})
+        store.upsertSession({ ...props.session })
+        addSystem(`Loop mode: ${loop.name}${loop.description ? ` — ${loop.description}` : ""}\nDefault system loop disabled. Run /loop off to return to normal.`)
+      }
       return true
     }
     if (trimmed === "/cron" || trimmed === "/cron list") {
@@ -978,17 +1029,48 @@ export function Composer(props: ComposerProps) {
         }, sid).catch((err) => tlog.warn("memory.extract.failed", { err }))
       }
 
-      // ── Background memory-compliance review ──────────────────────────────
-      // Review uses the same rule set that was injected, but findings remain
-      // user-controlled drafts instead of automatic correction turns.
+      // ── Post-turn loop dispatch ───────────────────────────────────────────
+      // If a loop mode is active, run it against this turn's output instead of
+      // the default compliance review. The loop receives the full response as
+      // context so its steps can inspect, test, or iterate on it.
       if (!ac.signal.aborted) {
-        void runComplianceReviewDraft({
-          session: s,
-          ac,
-          injectedMemories: [...alwaysMemories, ...semanticHits],
-          response: fullResponse,
-          toolEvidence: completedToolCalls,
-        })
+        const activeLoopName = s.activeLoop
+        if (activeLoopName) {
+          const loop = findLoop(activeLoopName)
+          if (loop) {
+            tlog.info("loop.mode.fire", { loopName: activeLoopName })
+            void runLoopTui(loop, `${text}\n\n---\n\nAgent response:\n${fullResponse}`, config, {
+              onMessage: (msg) => addSystem(msg),
+              waitForInput: (prompt) => new Promise((resolve) => {
+                addSystem(prompt)
+                loopInputResolver = resolve
+              }),
+              onStepStart: (_id, label, type) => props.onStatus(`⟳ ${label} (${type})`),
+              onToken: (tok) => {
+                const items = store.store.items[sessionId()] ?? []
+                const last = items[items.length - 1]
+                if (last?.kind === "assistant" && last.streaming) {
+                  store.updateLastItem(sessionId(), (i) => {
+                    if (i.kind === "assistant") i.content += tok
+                  })
+                } else {
+                  store.appendItem(sessionId(), { kind: "assistant", content: tok, streaming: true })
+                }
+              },
+              onToolStatus: (name) => props.onStatus(`⏳ ${name}`),
+            }, ac.signal).then(() => props.onStatus("")).catch(() => {})
+          } else {
+            addSystem(`Loop "${activeLoopName}" no longer found — run /loop to pick another or /loop off to disable.`)
+          }
+        } else {
+          void runComplianceReviewDraft({
+            session: s,
+            ac,
+            injectedMemories: [...alwaysMemories, ...semanticHits],
+            response: fullResponse,
+            toolEvidence: completedToolCalls,
+          })
+        }
       }
     } catch (err: unknown) {
       if ((err as Error)?.name !== "AbortError") {
@@ -1136,7 +1218,21 @@ export function Composer(props: ComposerProps) {
   }
 
   return (
-    <box flexDirection="column" height={COMPOSER_BORDER_HEIGHT + inputLines() + suggestions().length + modelPickerRows() + reviewDraftRows()}>
+    <box flexDirection="column" height={COMPOSER_BORDER_HEIGHT + inputLines() + suggestions().length + modelPickerRows() + loopPickerRows() + reviewDraftRows()}>
+      <Show when={loopPickerOpen()}>
+        <box flexDirection="column" height={loopPickerRows()} paddingLeft={2}>
+          <text fg={theme.textMuted}>Select loop (↑↓ · ↵ pick · esc cancel):</text>
+          <For each={loopPickerItems()}>
+            {(l, i) => (
+              <text fg={i() === loopPickerIdx() ? theme.primary : theme.textMuted}>
+                {`${i() === loopPickerIdx() ? "▶ " : "  "}${l.name}${l.description ? `  — ${l.description.slice(0, 50)}` : ""}`}
+              </text>
+            )}
+          </For>
+          <text fg={theme.textDim}> </text>
+        </box>
+      </Show>
+
       <Show when={modelPickerOpen()}>
         <box flexDirection="column" paddingLeft={2}>
           <text fg={theme.textMuted}>Select model (↑↓ navigate · ↵ pick · esc cancel):</text>
@@ -1178,7 +1274,7 @@ export function Composer(props: ComposerProps) {
       >
         <textarea
           ref={textareaRef}
-          focused={!modelPickerOpen()}
+          focused={!modelPickerOpen() && !loopPickerOpen()}
           placeholder={props.streaming ? "● streaming  (esc to abort)" : "Message… (↵ send, shift+↵ newline, /help, q back)"}
           placeholderColor={theme.textDim}
           textColor={theme.text}
@@ -1189,6 +1285,29 @@ export function Composer(props: ComposerProps) {
           maxHeight={COMPOSER_MAX_INPUT_ROWS}
           onContentChange={() => {
             const value = textareaRef?.plainText ?? ""
+            // On Mac without "Use Option as Meta key", Option+<key> produces a
+            // Unicode character instead of a meta key event. Intercept the known
+            // Option-key outputs here and fire the corresponding action so these
+            // bindings work on Mac without any terminal settings change.
+            // Option+V → √ (paste image), Option+S → ß (send review draft),
+            // Option+D → ∂ (dismiss review draft).
+            // Option+E is a dead key (acute accent) — no interceptable character,
+            // so alt+e (edit review draft) requires "Use Option as Meta key" on Mac.
+            if (!props.streaming && value.includes("√")) {
+              textareaRef!.setText(value.replace(/√/g, ""))
+              void pasteClipboardImage()
+              return
+            }
+            if (reviewDraft() && value.includes("ß")) {
+              textareaRef!.setText(value.replace(/ß/g, ""))
+              sendReviewDraft()
+              return
+            }
+            if (reviewDraft() && value.includes("∂")) {
+              textareaRef!.setText(value.replace(/∂/g, ""))
+              setReviewDraft(null)
+              return
+            }
             setInputValue(value)
             setSelectedIdx(0)
             // virtualLineCount is clamped by the editor's viewport height, so

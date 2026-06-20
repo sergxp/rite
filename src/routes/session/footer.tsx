@@ -5,6 +5,7 @@ import { loadMemories } from "../../memory/reader"
 import { DEFAULT_CLAUDE_MODEL } from "../../sessions/store"
 import {
   formatTerminalTitle,
+  isTerminalFocused,
   RITE_TITLE_ANIMATION_FRAMES,
   SPINNER_FRAMES,
   writeTerminalBell,
@@ -42,6 +43,10 @@ export function Footer(props: FooterProps) {
   })
   const memoryCount = createMemo(() => loadMemories().always.length)
   const workspace = createMemo(() => formatWorkspaceInfo(getWorkspaceInfo(props.session.workingDir)))
+  const activeLoop = createMemo(() => {
+    const live = store.store.sessions.find((s) => s.id === props.session.id)
+    return (live ?? props.session).activeLoop
+  })
   const [spinnerIdx, setSpinnerIdx] = createSignal(0)
   const [completionBadge, setCompletionBadge] = createSignal(false)
   let wasStreaming = false
@@ -73,7 +78,7 @@ export function Footer(props: FooterProps) {
     setCompletionBadge(true)
     writeTerminalTabStatus("complete")
     writeWindowsTerminalProgress("normal", 100)
-    writeTerminalBell()
+    if (!isTerminalFocused()) writeTerminalBell()
 
     const timeout = setTimeout(() => {
       setCompletionBadge(false)
@@ -109,6 +114,9 @@ export function Footer(props: FooterProps) {
       <text fg={theme.textMuted}>{name()}</text>
 
       <box flexDirection="row" gap={2}>
+        <Show when={activeLoop()}>
+          <text fg={theme.primary}>{`⟳ loop: ${activeLoop()}`}</text>
+        </Show>
         <Show when={props.status}>
           <text fg={theme.warning}>{props.status}</text>
         </Show>

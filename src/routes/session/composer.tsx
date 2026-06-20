@@ -531,7 +531,10 @@ export function Composer(props: ComposerProps) {
             addSystem(prompt)
             loopInputResolver = resolve
           }),
-        onStepStart: (_id, label, type) => props.onStatus(`⏳ ${label} (${type})`),
+        onStepStart: (stepId, label, type, stepIndex, stepTotal) => {
+          props.onStatus(`⏳ ${label} (${type})`)
+          store.appendItem(sessionId(), { kind: "loop-step", loopName: loop.name, stepId, stepLabel: label, stepType: type, stepIndex, stepTotal })
+        },
         onToken: (text) => {
           const items = store.store.items[sessionId()] ?? []
           const last = items[items.length - 1]
@@ -1045,7 +1048,10 @@ export function Composer(props: ComposerProps) {
                 addSystem(prompt)
                 loopInputResolver = resolve
               }),
-              onStepStart: (_id, label, type) => props.onStatus(`⟳ ${label} (${type})`),
+              onStepStart: (stepId, label, type, stepIndex, stepTotal) => {
+                props.onStatus(`⟳ ${label} (${type})`)
+                store.appendItem(sessionId(), { kind: "loop-step", loopName: loop.name, stepId, stepLabel: label, stepType: type, stepIndex, stepTotal })
+              },
               onToken: (tok) => {
                 const items = store.store.items[sessionId()] ?? []
                 const last = items[items.length - 1]

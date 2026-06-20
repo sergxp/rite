@@ -13,6 +13,7 @@ export type DisplayItem =
   | { kind: "thinking"; content: string; streaming?: boolean }
   | { kind: "tool"; name: string; inputJson: string; result: string; isError: boolean; durationMs: number; running?: boolean }
   | { kind: "system"; content: string }
+  | { kind: "loop-step"; loopName: string; stepId: string; stepLabel: string; stepType: string; stepIndex: number; stepTotal: number }
 
 export function turnsToItems(turns: Turn[]): DisplayItem[] {
   return turns.map((t) =>

@@ -21,7 +21,7 @@ export interface StepContext {
 export interface LoopCallbacks {
   onMessage(text: string): void;
   waitForInput(prompt: string): Promise<string>;
-  onStepStart?(stepId: string, stepLabel: string, stepType: string): void;
+  onStepStart?(stepId: string, stepLabel: string, stepType: string, stepIndex: number, stepTotal: number): void;
   onToken?(text: string): void;
   onToolStatus?(name: string): void;
 }
@@ -41,7 +41,7 @@ async function runLoopCore(
   sessionId: string,
   log: (s: string) => void,
   askUser: (prompt: string) => Promise<string>,
-  onStepStart?: (stepId: string, stepLabel: string, stepType: string) => void,
+  onStepStart?: (stepId: string, stepLabel: string, stepType: string, stepIndex: number, stepTotal: number) => void,
   onToken?: (text: string) => void,
   onToolStatus?: (name: string) => void,
   signal?: AbortSignal
@@ -81,8 +81,8 @@ async function runLoopCore(
     if (!step) break;
 
     const label = step.name ?? step.id;
-    log(`\n── Step: ${label} ──────────────────`);
-    onStepStart?.(step.id, label, step.type);
+    const stepIdx = stepIndexById(steps, step.id);
+    onStepStart?.(step.id, label, step.type, stepIdx, steps.length);
     llog.info("step.start", { stepId: step.id, label, type: step.type });
 
     if (step.human_checkpoint) {

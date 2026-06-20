@@ -129,14 +129,14 @@ function isAssistantSide(item: DisplayItem | undefined): boolean {
 function startsTurn(items: DisplayItem[], i: number): boolean {
   const it = items[i]
   if (!it) return false
-  if (it.kind === "user" || it.kind === "system") return true
+  if (it.kind === "user" || it.kind === "system" || it.kind === "loop-step") return true
   return isAssistantSide(it) && !isAssistantSide(items[i - 1])
 }
 
 function endsTurn(items: DisplayItem[], i: number): boolean {
   const it = items[i]
   if (!it) return false
-  if (it.kind === "user" || it.kind === "system") return true
+  if (it.kind === "user" || it.kind === "system" || it.kind === "loop-step") return true
   return isAssistantSide(it) && !isAssistantSide(items[i + 1])
 }
 
@@ -692,6 +692,20 @@ function ItemView(props: {
             {(item as Extract<DisplayItem, { kind: "system" }>).content}
           </text>
         </box>
+      </Match>
+
+      <Match when={item.kind === "loop-step"}>
+        {(() => {
+          const s = item as Extract<DisplayItem, { kind: "loop-step" }>
+          return (
+            <box flexDirection="row" gap={2} paddingLeft={CONTENT_INDENT}>
+              <text fg={theme.primary}>{`⟳ ${s.loopName}`}</text>
+              <text fg={theme.textDim}>{`step ${s.stepIndex + 1}/${s.stepTotal}`}</text>
+              <text fg={theme.success}>{s.stepLabel}</text>
+              <text fg={theme.textMuted}>{`(${s.stepType})`}</text>
+            </box>
+          )
+        })()}
       </Match>
     </Switch>
     </box>

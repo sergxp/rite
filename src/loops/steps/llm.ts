@@ -23,7 +23,7 @@ export async function runLlmStep(
   const resolvedPrompt = resolveTemplate(step.prompt, context);
 
   let output = "";
-  const stream = backendFn(resolvedPrompt, options?.signal);
+  const stream = backendFn(resolvedPrompt, options?.signal, step.model ? { model: step.model } : undefined);
 
   // Output is surfaced only through callbacks — never written to stdout directly.
   // The TUI owns the terminal (Ink alt-screen); a raw write would corrupt/flicker

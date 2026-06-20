@@ -13,6 +13,7 @@ export interface BaseStep {
 export interface LlmStep extends BaseStep {
   type: "llm";
   prompt: string;
+  model?: string;
 }
 
 export interface ShellStep extends BaseStep {

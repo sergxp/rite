@@ -778,6 +778,49 @@ export function Composer(props: ComposerProps) {
     const ac = new AbortController()
     setAbortController(ac)
 
+    // ── Loop mode short-circuit ───────────────────────────────────────────
+    // When a loop is active the user's message goes straight to the loop's
+    // first step — the main agent does NOT run. The loop owns the full turn.
+    if (s.activeLoop) {
+      const loop = findLoop(s.activeLoop)
+      if (!loop) {
+        addSystem(`Loop "${s.activeLoop}" no longer found — run /loop to pick another or /loop off to disable.`)
+      } else {
+        tlog.info("loop.mode.direct", { loopName: s.activeLoop })
+        const loopSid = sid
+        const toolCbs = makeLoopToolCallbacks(loopSid)
+        try {
+          await runLoopTui(loop, text, config, {
+            onMessage: (msg) => addSystem(msg),
+            waitForInput: (prompt) => new Promise((resolve) => {
+              addSystem(prompt)
+              loopInputResolver = resolve
+            }),
+            onStepStart: (stepId, label, type, stepIndex, stepTotal) => {
+              props.onStatus(`⟳ ${label} (${type})`)
+              store.appendItem(loopSid, { kind: "loop-step", loopName: loop.name, stepId, stepLabel: label, stepType: type, stepIndex, stepTotal })
+            },
+            onToken: (tok) => {
+              const items = store.store.items[loopSid] ?? []
+              const last = items[items.length - 1]
+              if (last?.kind === "assistant" && last.streaming) {
+                store.updateLastItem(loopSid, (i) => { if (i.kind === "assistant") i.content += tok })
+              } else {
+                store.appendItem(loopSid, { kind: "assistant", content: tok, streaming: true })
+              }
+            },
+            onToolStatus: (name) => props.onStatus(`⏳ ${name}`),
+            ...toolCbs,
+          }, ac.signal)
+        } finally {
+          store.updateLastItem(loopSid, (i) => { if (i.kind === "assistant") i.streaming = false })
+          loopInputResolver = null
+          props.onStatus("")
+        }
+      }
+      return
+    }
+
     try {
       // ── Memory gathering ─────────────────────────────────────────────────
       const loaded = loadMemories()
@@ -1066,53 +1109,15 @@ export function Composer(props: ComposerProps) {
         }, sid).catch((err) => tlog.warn("memory.extract.failed", { err }))
       }
 
-      // ── Post-turn loop dispatch ───────────────────────────────────────────
-      // If a loop mode is active, run it against this turn's output instead of
-      // the default compliance review. The loop receives the full response as
-      // context so its steps can inspect, test, or iterate on it.
+      // ── Background compliance review ─────────────────────────────────────
       if (!ac.signal.aborted) {
-        const activeLoopName = s.activeLoop
-        if (activeLoopName) {
-          const loop = findLoop(activeLoopName)
-          if (loop) {
-            tlog.info("loop.mode.fire", { loopName: activeLoopName })
-            const loopSid = sid
-            void runLoopTui(loop, `${text}\n\n---\n\nAgent response:\n${fullResponse}`, config, {
-              onMessage: (msg) => addSystem(msg),
-              waitForInput: (prompt) => new Promise((resolve) => {
-                addSystem(prompt)
-                loopInputResolver = resolve
-              }),
-              onStepStart: (stepId, label, type, stepIndex, stepTotal) => {
-                props.onStatus(`⟳ ${label} (${type})`)
-                store.appendItem(loopSid, { kind: "loop-step", loopName: loop.name, stepId, stepLabel: label, stepType: type, stepIndex, stepTotal })
-              },
-              onToken: (tok) => {
-                const items = store.store.items[loopSid] ?? []
-                const last = items[items.length - 1]
-                if (last?.kind === "assistant" && last.streaming) {
-                  store.updateLastItem(loopSid, (i) => {
-                    if (i.kind === "assistant") i.content += tok
-                  })
-                } else {
-                  store.appendItem(loopSid, { kind: "assistant", content: tok, streaming: true })
-                }
-              },
-              onToolStatus: (name) => props.onStatus(`⏳ ${name}`),
-              ...makeLoopToolCallbacks(loopSid),
-            }, ac.signal).then(() => props.onStatus("")).catch(() => {})
-          } else {
-            addSystem(`Loop "${activeLoopName}" no longer found — run /loop to pick another or /loop off to disable.`)
-          }
-        } else {
-          void runComplianceReviewDraft({
-            session: s,
-            ac,
-            injectedMemories: [...alwaysMemories, ...semanticHits],
-            response: fullResponse,
-            toolEvidence: completedToolCalls,
-          })
-        }
+        void runComplianceReviewDraft({
+          session: s,
+          ac,
+          injectedMemories: [...alwaysMemories, ...semanticHits],
+          response: fullResponse,
+          toolEvidence: completedToolCalls,
+        })
       }
     } catch (err: unknown) {
       if ((err as Error)?.name !== "AbortError") {

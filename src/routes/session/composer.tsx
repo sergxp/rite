@@ -854,6 +854,8 @@ export function Composer(props: ComposerProps) {
           store.upsertSession({ ...s })
         }
       }
+      setAbortController(null)
+      props.onStreamEnd()
       return
     }
 

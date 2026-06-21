@@ -123,7 +123,7 @@ export function Session() {
         for (const t of loaded.turns.slice(-config.historyLimit)) {
           history.add(t.role, t.content)
         }
-        store.setItems(loaded.id, turnsToItems(loaded.turns))
+        store.setItems(loaded.id, loaded.displayItems ?? turnsToItems(loaded.turns))
         setSession(loaded)
         return
       }

@@ -1,19 +1,8 @@
 import { createStore, produce, unwrap } from "solid-js/store"
 import { createSimpleContext } from "./helper"
-import type { Session, Turn } from "../sessions/types"
+import type { Session, Turn, DisplayItem } from "../sessions/types"
 
-/**
- * What the session transcript renders. Richer than persisted `Turn`s:
- * thinking blocks, tool calls, and system notices appear in the UI but only
- * user/assistant turns are saved to disk (mirrors v1).
- */
-export type DisplayItem =
-  | { kind: "user"; content: string }
-  | { kind: "assistant"; content: string; streaming?: boolean }
-  | { kind: "thinking"; content: string; streaming?: boolean }
-  | { kind: "tool"; name: string; inputJson: string; result: string; isError: boolean; durationMs: number; running?: boolean }
-  | { kind: "system"; content: string }
-  | { kind: "loop-step"; loopName: string; stepId: string; stepLabel: string; stepType: string; stepIndex: number; stepTotal: number }
+export type { DisplayItem }
 
 export function turnsToItems(turns: Turn[]): DisplayItem[] {
   return turns.map((t) =>

@@ -841,6 +841,16 @@ export function Composer(props: ComposerProps) {
           store.updateLastItem(loopSid, (i) => { if (i.kind === "assistant") i.streaming = false })
           loopInputResolver = null
           props.onStatus("")
+          // Persist display items so the loop transcript survives a reload.
+          s.turns.push({ role: "user", content: text })
+          s.updatedAt = new Date().toISOString()
+          s.displayItems = (store.store.items[loopSid] ?? []).map((item) => {
+            if (item.kind === "assistant" || item.kind === "thinking") return { ...item, streaming: false }
+            if (item.kind === "tool") return { ...item, running: false }
+            return item
+          })
+          void SessionStore.save(s)
+          store.upsertSession({ ...s })
         }
       }
       return
@@ -1101,6 +1111,15 @@ export function Composer(props: ComposerProps) {
       s.memoriesActive = [...alwaysMemories, ...semanticHits]
         .map((m) => ({ name: m.frontmatter.name, tier: m.tier, inject: m.frontmatter.inject }))
         .filter((m) => (seen.has(m.name) ? false : (seen.add(m.name), true)))
+      // Persist the full display item log so tool calls, thinking, loop-step
+      // headers, and system messages are restored when the session is reloaded.
+      // Strip runtime-only flags before writing — nothing should be streaming
+      // or running at this point, but guard defensively.
+      s.displayItems = (store.store.items[sid] ?? []).map((item) => {
+        if (item.kind === "assistant" || item.kind === "thinking") return { ...item, streaming: false }
+        if (item.kind === "tool") return { ...item, running: false }
+        return item
+      })
       await SessionStore.save(s)
       store.upsertSession({ ...s })
 

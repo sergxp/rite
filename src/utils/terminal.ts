@@ -40,8 +40,45 @@ export function writeTerminalTitle(title: string, writer: Writer = process.stdou
   writer(`\x1b]2;${safeOscText(title)}\x07`)
 }
 
+// Terminal focus tracking via focus-reporting mode (\x1b[?1004h).
+// When enabled, the terminal sends \x1b[I on focus-in and \x1b[O on focus-out.
+// We default to "focused" (true) so the bell is suppressed until we get a
+// definitive focus-out event — better to miss a bell than to spam one.
+let _terminalFocused = true
+
+export function isTerminalFocused(): boolean {
+  return _terminalFocused
+}
+
+// Call this with each raw input sequence from the terminal. Returns true if
+// the sequence was a focus event (caller should suppress it from further input
+// handling), false otherwise.
+export function handleFocusSequence(seq: string): boolean {
+  if (seq === "\x1b[I") { _terminalFocused = true; return true }
+  if (seq === "\x1b[O") { _terminalFocused = false; return true }
+  return false
+}
+
+// The escape sequence to enable focus reporting. Write this to stdout at
+// startup and disable it (\x1b[?1004l) on shutdown.
+export const FOCUS_REPORTING_ENABLE  = "\x1b[?1004h"
+export const FOCUS_REPORTING_DISABLE = "\x1b[?1004l"
+
 export function writeTerminalBell(writer: Writer = process.stdout.write.bind(process.stdout)): void {
   writer("\x07")
+}
+
+/**
+ * Pretty-print a tool name for status display.
+ * MCP tools arrive as "mcp__server__method" — converts to "server › method".
+ * Regular tool names are returned as-is.
+ */
+export function formatToolName(name: string): string {
+  if (name.startsWith("mcp__")) {
+    const parts = name.slice(5).split("__")
+    if (parts.length >= 2) return `${parts[0]} › ${parts.slice(1).join("__")}`
+  }
+  return name
 }
 
 export function supportsWindowsTerminalIntegration(env: NodeJS.ProcessEnv = process.env): boolean {

@@ -12,6 +12,15 @@ import { installCrashHandlers, log } from "./utils/logger"
 import { getEmbeddingPipeline } from "./memory/embeddings"
 import { copyToClipboard } from "./utils/clipboard"
 import { markdownCopyTextForSelection } from "./utils/markdown-copy-source"
+import {
+  handleFocusSequence,
+  FOCUS_REPORTING_ENABLE,
+  FOCUS_REPORTING_DISABLE,
+} from "./utils/terminal"
+
+// Matches cursor-position responses (\x1b[row;colR) and cursor-move commands
+// that sometimes leak from subprocesses (\x1b[row;colH).
+const CUP_SEQUENCE_RE = /^\x1b\[\d+;\d+[RH]/
 import { Home } from "./routes/home"
 import { Session } from "./routes/session/index"
 
@@ -111,15 +120,19 @@ export async function startApp(options: AppOptions = {}) {
     // Covers: OSC color replies, DCS/XTVERSION, DECRPM mode reports, cursor pos.
     prependInputHandlers: [
       (seq: string) =>
+        handleFocusSequence(seq) ||   // focus in/out (\x1b[I / \x1b[O)
         seq.startsWith("\x1b]") ||   // OSC  (color queries)
         seq.startsWith("\x9d") ||    // C1 OSC
         seq.startsWith("\x1bP") ||   // DCS  (XTVERSION: \x1bP>|iTerm2...\x1b\\)
         seq.startsWith("\x90") ||    // C1 DCS
         /^\x1b\[\?[\d;]+\$y/.test(seq) || // DECRPM mode reports (N;M$y)
-        /^\x1b\[\d+;\d+R/.test(seq) ||    // cursor position reports
+        CUP_SEQUENCE_RE.test(seq) ||       // cursor position/move (\x1b[R;CH and \x1b[R;CR)
         /^\x1b\[4;\d+;\d+t/.test(seq),    // pixel dimension reports (\x1b[14t reply)
     ],
   })
+
+  process.stdout.write(FOCUS_REPORTING_ENABLE)
+  process.on("exit", () => process.stdout.write(FOCUS_REPORTING_DISABLE))
 
   await render(
     () => (

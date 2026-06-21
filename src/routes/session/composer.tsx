@@ -35,6 +35,7 @@ import {
   MIN_INTERVAL_MS,
 } from "../../scheduler/cron"
 import { log } from "../../utils/logger"
+import { formatToolName } from "../../utils/terminal"
 import type { ConversationHistory } from "../../history/history"
 import type { MemoryFile } from "../../memory/types"
 import type { Session } from "../../sessions/types"
@@ -540,11 +541,11 @@ export function Composer(props: ComposerProps) {
     const startedAt = new Map<string, number>()
     return {
       onToolCall: (name: string, id: string) => {
-        props.onStatus(`⏳ ${name}`)
+        props.onStatus(`⏳ ${formatToolName(name)}`)
         startedAt.set(id, Date.now())
         const items = store.store.items[sid] ?? []
         toolItemIndex.set(id, items.length)
-        store.appendItem(sid, { kind: "tool", name, inputJson: "", result: "", isError: false, durationMs: 0, running: true })
+        store.appendItem(sid, { kind: "tool", name: formatToolName(name), inputJson: "", result: "", isError: false, durationMs: 0, running: true })
       },
       onToolDone: (name: string, id: string, inputJson: string) => {
         const idx = toolItemIndex.get(id)
@@ -603,7 +604,7 @@ export function Composer(props: ComposerProps) {
             store.appendItem(sid, { kind: "assistant", content: text, streaming: true })
           }
         },
-        onToolStatus: (name) => props.onStatus(`⏳ ${name}`),
+        onToolStatus: (name) => props.onStatus(`⏳ ${formatToolName(name)}`),
         ...makeLoopThinkingCallbacks(sid),
         ...makeLoopToolCallbacks(sid),
       }, ac.signal)
@@ -833,7 +834,7 @@ export function Composer(props: ComposerProps) {
                 store.appendItem(loopSid, { kind: "assistant", content: tok, streaming: true })
               }
             },
-            onToolStatus: (name) => props.onStatus(`⏳ ${name}`),
+            onToolStatus: (name) => props.onStatus(`⏳ ${formatToolName(name)}`),
             ...makeLoopThinkingCallbacks(loopSid),
             ...makeLoopToolCallbacks(loopSid),
           }, ac.signal)
@@ -1006,7 +1007,7 @@ export function Composer(props: ComposerProps) {
         },
         onToolStart: (tool) => {
           if (ac.signal.aborted) return
-          props.onStatus(`⏳ ${tool.name}`)
+          props.onStatus(`⏳ ${formatToolName(tool.name)}`)
         },
         onToolReady: (tool, id) => {
           if (ac.signal.aborted) return
@@ -1015,7 +1016,7 @@ export function Composer(props: ComposerProps) {
           toolItemIndex.set(id, items.length)
           store.appendItem(sid, {
             kind: "tool",
-            name: tool.name,
+            name: formatToolName(tool.name),
             inputJson: tool.inputJson,
             result: "",
             isError: false,

@@ -9,6 +9,8 @@ export type BackendEvent =
 export interface BackendCallOpts {
   resumeSessionId?: string
   model?: string
+  /** Effort level passed to the Claude CLI (--effort): "low" | "medium" | "high". */
+  effort?: string
   /** Correlation id for this turn — surfaces in logs so a single turn can be traced. */
   turnId?: string
   /** Session id, attached to every log line for this call. */

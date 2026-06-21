@@ -94,6 +94,9 @@ export async function* callClaude(
   if (opts?.model) {
     args.push("--model", opts.model)
   }
+  if (opts?.effort) {
+    args.push("--effort", opts.effort)
+  }
 
   const turnLog = log.child("claude.stream", {
     sessionId: opts?.sessionId,

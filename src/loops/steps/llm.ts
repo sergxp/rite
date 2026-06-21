@@ -27,7 +27,8 @@ export async function runLlmStep(
   const backendFn = getBackend(backend);
 
   const resolvedPrompt = resolveTemplate(step.prompt, context);
-  const stream = backendFn(resolvedPrompt, options?.signal, step.model ? { model: step.model } : undefined);
+  const stream = backendFn(resolvedPrompt, options?.signal,
+    (step.model || step.effort) ? { model: step.model, effort: step.effort } : undefined);
 
   let segmentLen = 0
   const { text } = await drainAgentStream(stream, {

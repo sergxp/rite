@@ -1,4 +1,5 @@
 import { callUtilityBlocking } from "../../backends/utility.js";
+import { resolveTemplate } from "../../utils/template.js";
 import type { ConditionStep } from "../types.js";
 import type { StepContext } from "../runner.js";
 
@@ -13,18 +14,13 @@ export async function runConditionStep(
   context: StepContext
 ): Promise<ConditionStepResult> {
   try {
-    const stepIds = Object.keys(context.stepOutputs);
-    const lastStepId = stepIds[stepIds.length - 1];
-    const recentOutput =
-      lastStepId !== undefined
-        ? context.stepOutputs[lastStepId]
-        : context.context;
+    // Resolve {{steps.X.output}} and {{context}} references in the prompt so
+    // the condition always evaluates the explicitly named step, not whatever
+    // happened to run last (which breaks in loops where step order cycles).
+    const resolvedPrompt = resolveTemplate(step.prompt, context);
 
     const question = [
-      "Previous step context:",
-      recentOutput,
-      "",
-      `Question: ${step.prompt}`,
+      resolvedPrompt,
       "",
       "Respond with only: true or false",
     ].join("\n");

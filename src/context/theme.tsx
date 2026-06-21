@@ -49,7 +49,7 @@ function makeTheme(): Theme {
     textMuted: "gray",
     textDim: "gray",
     primary: "cyan",
-    success: "green",
+    success: "brightGreen",
     warning: "yellow",
     error: "red",
     info: "cyan",

@@ -23,6 +23,8 @@ export interface LoopCallbacks {
   waitForInput(prompt: string): Promise<string>;
   onStepStart?(stepId: string, stepLabel: string, stepType: string, stepIndex: number, stepTotal: number): void;
   onToken?(text: string): void;
+  onThinkingDelta?(accumulated: string): void;
+  onThinkingEnd?(text: string): void;
   onToolStatus?(name: string): void;
   onToolCall?(name: string, id: string): void;
   onToolDone?(name: string, id: string, inputJson: string): void;
@@ -46,6 +48,8 @@ async function runLoopCore(
   askUser: (prompt: string) => Promise<string>,
   onStepStart?: (stepId: string, stepLabel: string, stepType: string, stepIndex: number, stepTotal: number) => void,
   onToken?: (text: string) => void,
+  onThinkingDelta?: (accumulated: string) => void,
+  onThinkingEnd?: (text: string) => void,
   onToolStatus?: (name: string) => void,
   onToolCall?: (name: string, id: string) => void,
   onToolDone?: (name: string, id: string, inputJson: string) => void,
@@ -104,6 +108,8 @@ async function runLoopCore(
       case "llm": {
         const result = await runLlmStep(step, stepContext, {
           onToken,
+          onThinkingDelta,
+          onThinkingEnd,
           onToolStatus,
           onToolCall,
           onToolDone,
@@ -266,7 +272,7 @@ export async function runLoop(
   const onToolStatus = (name: string) => process.stdout.write(`\n[tool: ${name}]\n`);
   await runLoopCore(
     loop, context, config, sessionId, console.log, askUser,
-    undefined, onToken, onToolStatus, undefined, undefined, undefined
+    undefined, onToken, undefined, undefined, onToolStatus, undefined, undefined, undefined
   );
 }
 
@@ -284,6 +290,8 @@ export async function runLoopTui(
     callbacks.waitForInput,
     callbacks.onStepStart,
     callbacks.onToken,
+    callbacks.onThinkingDelta,
+    callbacks.onThinkingEnd,
     callbacks.onToolStatus,
     callbacks.onToolCall,
     callbacks.onToolDone,

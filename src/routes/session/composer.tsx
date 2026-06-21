@@ -511,6 +511,30 @@ export function Composer(props: ComposerProps) {
     }
   }
 
+  function makeLoopThinkingCallbacks(sid: string) {
+    let thinkingIdx: number | null = null
+    return {
+      onThinkingDelta: (accumulated: string) => {
+        props.onStatus("✻ thinking…")
+        if (thinkingIdx === null) {
+          const items = store.store.items[sid] ?? []
+          thinkingIdx = items.length
+          store.appendItem(sid, { kind: "thinking", content: accumulated, streaming: true })
+        } else {
+          store.updateItemAt(sid, thinkingIdx, (i) => { if (i.kind === "thinking") i.content = accumulated })
+        }
+      },
+      onThinkingEnd: (text: string) => {
+        props.onStatus("")
+        if (thinkingIdx !== null) {
+          const idx = thinkingIdx
+          thinkingIdx = null
+          store.updateItemAt(sid, idx, (i) => { if (i.kind === "thinking") { i.content = text; i.streaming = false } })
+        }
+      },
+    }
+  }
+
   function makeLoopToolCallbacks(sid: string) {
     const toolItemIndex = new Map<string, number>()
     const startedAt = new Map<string, number>()
@@ -580,6 +604,7 @@ export function Composer(props: ComposerProps) {
           }
         },
         onToolStatus: (name) => props.onStatus(`⏳ ${name}`),
+        ...makeLoopThinkingCallbacks(sid),
         ...makeLoopToolCallbacks(sid),
       }, ac.signal)
     } catch (err) {
@@ -788,7 +813,6 @@ export function Composer(props: ComposerProps) {
       } else {
         tlog.info("loop.mode.direct", { loopName: s.activeLoop })
         const loopSid = sid
-        const toolCbs = makeLoopToolCallbacks(loopSid)
         try {
           await runLoopTui(loop, text, config, {
             onMessage: (msg) => addSystem(msg),
@@ -810,7 +834,8 @@ export function Composer(props: ComposerProps) {
               }
             },
             onToolStatus: (name) => props.onStatus(`⏳ ${name}`),
-            ...toolCbs,
+            ...makeLoopThinkingCallbacks(loopSid),
+            ...makeLoopToolCallbacks(loopSid),
           }, ac.signal)
         } finally {
           store.updateLastItem(loopSid, (i) => { if (i.kind === "assistant") i.streaming = false })

@@ -1,0 +1,46 @@
+{
+  "name": "peer-programming",
+  "description": "Two principal engineers collaborate: Dev A proposes, Dev B reviews, iterate until approved",
+  "steps": [
+    {
+      "id": "propose",
+      "name": "Dev A: Propose",
+      "type": "llm",
+      "model": "claude-sonnet-4-6",
+      "effort": "low",
+      "prompt": "You are a principal software engineer. Your job is to propose a clear, concrete solution to the task below.\n\nRecent session context (for background — the task is below):\n{{{session_context}}}\n\nWrite out:\n1. Your understanding of the task\n2. Your proposed approach (with specific code, file changes, or steps)\n3. Any tradeoffs or risks you see\n\nBe specific — vague proposals will be rejected.\n\nTask:\n{{context}}"
+    },
+    {
+      "id": "review",
+      "name": "Dev B: Review",
+      "type": "llm",
+      "model": "claude-opus-4-8",
+      "effort": "low",
+      "prompt": "You are a principal engineer doing a rigorous code review. You are critical, precise, and do not accept incomplete or vague work.\n\nTask your peer was given:\n{{context}}\n\nPeer's initial proposal:\n{{steps.propose.output}}\n\nLatest revision from peer (empty on first review):\n{{steps.implement.output}}\n\nReview the most recent work (the revision if it exists, otherwise the proposal). Be specific about what is wrong, what is missing, and exactly what needs to change. Do not be vague — if code is wrong, show the correct version. If an approach is flawed, explain why and prescribe the fix.\n\nYou have access to Playwright MCP tools. Use them whenever it would give you ground truth that a code review alone cannot — for example:\n- Reproduce a reported bug by navigating to the affected page and triggering the issue\n- Verify a feature actually works end-to-end, not just that the code looks correct\n- Capture real network requests, console errors, or server responses to validate behaviour\n- Take screenshots to confirm UI changes look right\n- Check that error states, loading states, or edge cases behave as expected\nDo not skip this when the task is UI, API, or behaviour-related. A code review that could have been verified with Playwright but wasn't is an incomplete review.\n\nEnd your review with one of these two lines on its own line:\nVERDICT: APPROVED\nVERDICT: NEEDS_WORK"
+    },
+    {
+      "id": "check_done",
+      "name": "Check: Approved?",
+      "type": "condition",
+      "prompt": "Does the following peer engineer review end with the line 'VERDICT: APPROVED'?\n\nReview:\n{{steps.review.output}}\n\nAnswer true if approved, false if it needs more work.",
+      "if_true": "summarize",
+      "if_false": "implement"
+    },
+    {
+      "id": "implement",
+      "name": "Dev A: Revise",
+      "type": "llm",
+      "model": "claude-sonnet-4-6",
+      "effort": "low",
+      "prompt": "You are a principal software engineer. Your peer engineer has reviewed your work and provided feedback.\n\nOriginal task:\n{{context}}\n\nYour previous work:\n{{steps.implement.output}}\n{{steps.propose.output}}\n\nPeer's feedback:\n{{steps.review.output}}\n\nAddress every point your peer raised. Be specific and complete — your peer engineer will reject hand-wavy fixes. Show the actual code or changes.",
+      "next": "review"
+    },
+    {
+      "id": "summarize",
+      "name": "Principal: Final Sign-off",
+      "type": "llm",
+      "model": "claude-haiku-4-5-20251001",
+      "prompt": "The engineer's work has been approved. Write a concise sign-off summary.\n\nOriginal task:\n{{context}}\n\nFinal approved implementation:\n{{steps.implement.output}}\n{{steps.propose.output}}\n\nSummarize: what was built, what changed between iterations, and any notes for the team."
+    }
+  ]
+}

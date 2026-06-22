@@ -5,7 +5,7 @@ import { join } from "path"
 import os from "os"
 import { execSync } from "child_process"
 import { startApp } from "./app.js"
-import { ensureRiteDir } from "./utils/init.js"
+import { ensureRiteDir, ensureDefaultLoops } from "./utils/init.js"
 import { loadConfig } from "./config/loader.js"
 import { loadMemories } from "./memory/reader.js"
 import { createMemory, deleteMemory } from "./memory/writer.js"
@@ -25,6 +25,7 @@ program
   .description("Start or resume an interactive session")
   .option("-r, --resume <id>", "Resume a session by ID")
   .action(async (opts: { resume?: string }) => {
+    ensureDefaultLoops()
     await startApp({ resumeSessionId: opts.resume })
   })
 

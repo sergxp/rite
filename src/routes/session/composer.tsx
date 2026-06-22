@@ -18,6 +18,7 @@ import { autoNameForkSession, autoNameSession } from "../../sessions/namer"
 import { SessionStore } from "../../sessions/store"
 import { loadLoops, findLoop } from "../../loops/registry"
 import { runLoopTui } from "../../loops/runner"
+import { prepareLoopHistory } from "../../loops/history"
 import { checkMemoryCompliance, TOOL_EVIDENCE_HEADER } from "../../loops/default-review"
 import { copyToClipboard } from "../../utils/clipboard"
 import { saveClipboardImage, nextAttachmentImagePath } from "../../utils/clipboard-image"
@@ -82,6 +83,15 @@ const SLASH_COMMANDS = [
 ]
 
 const CLAUDE_MODELS = ["claude-fable-5", "claude-opus-4-8", "claude-sonnet-4-6"]
+
+function recordLoopTurn(session: Session, userText: string, finalAnswer: string | undefined) {
+  session.turns.push({ role: "user", content: userText })
+  if (finalAnswer?.trim()) {
+    session.turns.push({ role: "assistant", content: finalAnswer.trim() })
+  }
+  session.updatedAt = new Date().toISOString()
+  void SessionStore.save(session)
+}
 
 function completionsFor(value: string): string[] {
   if (!value.startsWith("/") || value.length < 2) return []
@@ -581,8 +591,14 @@ export function Composer(props: ComposerProps) {
     props.onStreamStart()
     addSystem(`Running loop: ${loop.name}`)
     const sid = sessionId()
+    const { history: slashLoopHistory, warnEmpty: slashWarnEmpty } = prepareLoopHistory(props.session.turns)
+    log.debug("loop.history", { path: "slash", totalTurns: props.session.turns.length, passedTurns: slashLoopHistory.length })
+    if (slashWarnEmpty) {
+      addSystem("Note: no prior conversation context available for this loop. Have a chat in this session first if the loop needs prior context.")
+    }
+    let slashFinalAnswer: string | undefined
     try {
-      await runLoopTui(loop, context, config, {
+      slashFinalAnswer = await runLoopTui(loop, context, config, {
         onMessage: (text) => addSystem(text),
         waitForInput: (prompt) =>
           new Promise<string>((resolve) => {
@@ -607,7 +623,7 @@ export function Composer(props: ComposerProps) {
         onToolStatus: (name) => props.onStatus(`⏳ ${formatToolName(name)}`),
         ...makeLoopThinkingCallbacks(sid),
         ...makeLoopToolCallbacks(sid),
-      }, ac.signal)
+      }, slashLoopHistory, ac.signal)
     } catch (err) {
       addSystem(`Loop failed: ${(err as Error).message}`)
     } finally {
@@ -615,6 +631,8 @@ export function Composer(props: ComposerProps) {
         if (i.kind === "assistant") i.streaming = false
       })
       loopInputResolver = null
+      recordLoopTurn(props.session, context, slashFinalAnswer)
+      store.upsertSession({ ...props.session })
       setAbortController(null)
       props.onStreamEnd()
     }
@@ -814,8 +832,14 @@ export function Composer(props: ComposerProps) {
       } else {
         tlog.info("loop.mode.direct", { loopName: s.activeLoop })
         const loopSid = sid
+        const { history: loopHistory, warnEmpty: activeWarnEmpty } = prepareLoopHistory(s.turns)
+        tlog.debug("loop.history", { path: "active", totalTurns: s.turns.length, passedTurns: loopHistory.length })
+        if (activeWarnEmpty) {
+          addSystem("Note: no prior conversation context available for this loop. Have a chat in this session first if the loop needs prior context.")
+        }
+        let activeFinalAnswer: string | undefined
         try {
-          await runLoopTui(loop, text, config, {
+          activeFinalAnswer = await runLoopTui(loop, text, config, {
             onMessage: (msg) => addSystem(msg),
             waitForInput: (prompt) => new Promise((resolve) => {
               addSystem(prompt)
@@ -837,20 +861,17 @@ export function Composer(props: ComposerProps) {
             onToolStatus: (name) => props.onStatus(`⏳ ${formatToolName(name)}`),
             ...makeLoopThinkingCallbacks(loopSid),
             ...makeLoopToolCallbacks(loopSid),
-          }, ac.signal)
+          }, loopHistory, ac.signal)
         } finally {
           store.updateLastItem(loopSid, (i) => { if (i.kind === "assistant") i.streaming = false })
           loopInputResolver = null
           props.onStatus("")
-          // Persist display items so the loop transcript survives a reload.
-          s.turns.push({ role: "user", content: text })
-          s.updatedAt = new Date().toISOString()
+          recordLoopTurn(s, text, activeFinalAnswer)
           s.displayItems = (store.store.items[loopSid] ?? []).map((item) => {
             if (item.kind === "assistant" || item.kind === "thinking") return { ...item, streaming: false }
             if (item.kind === "tool") return { ...item, running: false }
             return item
           })
-          void SessionStore.save(s)
           store.upsertSession({ ...s })
         }
       }

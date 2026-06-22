@@ -16,6 +16,7 @@ export interface StepContext {
   stepOutputs: Record<string, string>;
   memories: LoadedMemories;
   config: RiteConfig;
+  conversationHistory?: ReadonlyArray<{ role: "user" | "assistant"; content: string }>;
 }
 
 export interface LoopCallbacks {
@@ -54,8 +55,9 @@ async function runLoopCore(
   onToolCall?: (name: string, id: string) => void,
   onToolDone?: (name: string, id: string, inputJson: string) => void,
   onToolResult?: (id: string, result: string, isError: boolean) => void,
+  conversationHistory?: ReadonlyArray<{ role: "user" | "assistant"; content: string }>,
   signal?: AbortSignal
-): Promise<void> {
+): Promise<string | undefined> {
   const llog = riteLog.child("loops", { sessionId, loopName: loop.name });
   llog.info("loop.start", { contextLen: context.length, stepCount: loop.steps.length });
   const memories = loadMemories();
@@ -64,6 +66,7 @@ async function runLoopCore(
     stepOutputs: {},
     memories,
     config,
+    conversationHistory,
   };
 
   const steps = loop.steps;
@@ -76,6 +79,7 @@ async function runLoopCore(
   let currentIndex = 0;
   let forceNextId: string | undefined;
   const reviewIterations: Record<string, number> = {};
+  let lastOutput: string | undefined;
 
   while (currentIndex < steps.length) {
     if (signal?.aborted) {
@@ -187,6 +191,9 @@ async function runLoopCore(
 
     const durationMs = Date.now() - stepStartMs;
     stepContext.stepOutputs[step.id] = output;
+    if (output.trim() && step.type !== "condition" && step.type !== "review") {
+      lastOutput = output;
+    }
     llog.info("step.done", {
       stepId: step.id,
       type: step.type,
@@ -252,6 +259,7 @@ async function runLoopCore(
     session.turns.push({ role: "assistant", content: out });
   }
   await SessionStore.save(session);
+  return lastOutput;
 }
 
 export async function runLoop(
@@ -272,7 +280,8 @@ export async function runLoop(
   const onToolStatus = (name: string) => process.stdout.write(`\n[tool: ${name}]\n`);
   await runLoopCore(
     loop, context, config, sessionId, console.log, askUser,
-    undefined, onToken, undefined, undefined, onToolStatus, undefined, undefined, undefined
+    undefined, onToken, undefined, undefined, onToolStatus, undefined, undefined, undefined,
+    undefined
   );
 }
 
@@ -281,10 +290,11 @@ export async function runLoopTui(
   context: string,
   config: RiteConfig,
   callbacks: LoopCallbacks,
+  conversationHistory?: ReadonlyArray<{ role: "user" | "assistant"; content: string }>,
   signal?: AbortSignal
-): Promise<void> {
+): Promise<string | undefined> {
   const sessionId = makeSessionId();
-  await runLoopCore(
+  return runLoopCore(
     loop, context, config, sessionId,
     callbacks.onMessage,
     callbacks.waitForInput,
@@ -296,6 +306,7 @@ export async function runLoopTui(
     callbacks.onToolCall,
     callbacks.onToolDone,
     callbacks.onToolResult,
+    conversationHistory,
     signal
   );
 }

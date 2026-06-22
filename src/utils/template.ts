@@ -29,6 +29,11 @@ export function resolveTemplate(template: string, context: StepContext): string 
     .map((m) => m.content)
     .join("\n\n---\n\n");
 
+  const sessionContext =
+    (context.conversationHistory ?? [])
+      .map((t) => `${t.role === "user" ? "User" : "Assistant"}: ${t.content}`)
+      .join("\n\n") || "(no prior conversation)";
+
   const view = {
     memory: {
       always: alwaysContent,
@@ -37,6 +42,7 @@ export function resolveTemplate(template: string, context: StepContext): string 
       project: projectContent,
     },
     context: context.context,
+    session_context: sessionContext,
   };
 
   return Mustache.render(preProcessed, view);

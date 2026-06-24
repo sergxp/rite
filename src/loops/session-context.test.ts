@@ -132,6 +132,28 @@ describe("runLoopTui threads conversationHistory into StepContext", () => {
     const ctx = (mockRunLlmStep.mock.calls as any)[0][1] as StepContext
     expect(ctx.conversationHistory).toEqual(history)
   })
+
+  test("returns all step outputs so the main session can retain loop context", async () => {
+    mockRunLlmStep
+      .mockResolvedValueOnce({ output: "proposal output", resolvedPrompt: "" })
+      .mockResolvedValueOnce({ output: "review output", resolvedPrompt: "" })
+    const loop = {
+      name: "t",
+      steps: [
+        { id: "propose", type: "llm" as const, prompt: "" },
+        { id: "review", type: "llm" as const, prompt: "" },
+      ],
+    } as any
+    const callbacks = {
+      onMessage: () => {},
+      waitForInput: async () => "",
+    } as any
+
+    const output = await runLoopTui(loop, "implement option b", {} as any, callbacks, [])
+
+    expect(output).toContain("[propose]: proposal output")
+    expect(output).toContain("[review]: review output")
+  })
 })
 
 describe("prepareLoopHistory — the function both composer call sites invoke", () => {

@@ -1,4 +1,4 @@
-import { createMemo, createEffect, createSignal, onCleanup, Show } from "solid-js"
+import { createMemo, createEffect, createSignal, onCleanup, For } from "solid-js"
 import { useTheme } from "../../context/theme"
 import { useSessionStore } from "../../context/session-store"
 import { loadMemories } from "../../memory/reader"
@@ -20,6 +20,37 @@ interface FooterProps {
   session: Session
   streaming: boolean
   status: string
+  width: number
+  onHeightChange: (height: number) => void
+}
+
+interface FooterLabel {
+  text: string
+  fg: string | undefined
+}
+
+const FOOTER_LABEL_SEPARATOR = " · "
+
+export function packFooterLabels(labels: FooterLabel[], width: number): FooterLabel[][] {
+  const safeWidth = Math.max(20, width)
+  const rows: FooterLabel[][] = []
+  let current: FooterLabel[] = []
+  let currentWidth = 0
+
+  for (const label of labels.filter((l) => l.text.trim())) {
+    const nextWidth = currentWidth + (current.length > 0 ? FOOTER_LABEL_SEPARATOR.length : 0) + label.text.length
+    if (current.length > 0 && nextWidth > safeWidth) {
+      rows.push(current)
+      current = [label]
+      currentWidth = label.text.length
+      continue
+    }
+    current.push(label)
+    currentWidth = nextWidth
+  }
+
+  if (current.length > 0) rows.push(current)
+  return rows.length > 0 ? rows : [[{ text: "", fg: undefined }]]
 }
 
 export function Footer(props: FooterProps) {
@@ -103,34 +134,46 @@ export function Footer(props: FooterProps) {
     writeTerminalTitle(formatTerminalTitle(name(), taskState(), titleFrame))
   })
 
+  const labels = createMemo<FooterLabel[]>(() => {
+    const modelName = model()
+    return [
+      { text: name(), fg: theme.assistantMsg },
+      activeLoop() ? { text: `⟳ loop: ${activeLoop()}`, fg: theme.primary } : null,
+      props.status ? { text: props.status, fg: theme.warning } : null,
+      props.streaming ? { text: `${SPINNER_FRAMES[spinnerIdx()]} running`, fg: theme.primary } : null,
+      !props.streaming && completionBadge() ? { text: "✓ done", fg: theme.success } : null,
+      { text: workspace(), fg: theme.assistantMsg },
+      { text: `${memoryCount()} ${memoryCount() === 1 ? "memory" : "memories"}`, fg: theme.assistantMsg },
+      { text: `${turnCount()} turns`, fg: theme.assistantMsg },
+      { text: props.session.backend, fg: theme.assistantMsg },
+      modelName ? { text: modelName, fg: theme.assistantMsg } : null,
+    ].filter((label): label is FooterLabel => label !== null)
+  })
+  const rows = createMemo(() => packFooterLabels(labels(), Math.max(20, props.width - 2)))
+
+  createEffect(() => props.onHeightChange(rows().length))
+
   return (
     <box
-      flexDirection="row"
-      justifyContent="space-between"
-      height={1}
+      flexDirection="column"
+      height={rows().length}
       paddingLeft={1}
       paddingRight={1}
     >
-      <text fg={theme.textMuted}>{name()}</text>
-
-      <box flexDirection="row" gap={2}>
-        <Show when={activeLoop()}>
-          <text fg={theme.primary}>{`⟳ loop: ${activeLoop()}`}</text>
-        </Show>
-        <Show when={props.status}>
-          <text fg={theme.warning}>{props.status}</text>
-        </Show>
-        <Show when={props.streaming}>
-          <text fg={theme.primary}>{`${SPINNER_FRAMES[spinnerIdx()]} running`}</text>
-        </Show>
-        <Show when={!props.streaming && completionBadge()}>
-          <text fg={theme.success}>✓ done</text>
-        </Show>
-        <text fg={theme.textDim}>
-          {`${workspace()} · ${memoryCount()} ${memoryCount() === 1 ? "memory" : "memories"} · ${turnCount()} turns · ${props.session.backend}${model() ? ` · ${model()}` : ""}`}
-        </text>
-        <text fg={theme.textDim}>esc abort · q back</text>
-      </box>
+      <For each={rows()}>
+        {(row) => (
+          <box flexDirection="row">
+            <For each={row}>
+              {(label, i) => (
+                <>
+                  {i() > 0 ? <text fg={theme.textDim}>{FOOTER_LABEL_SEPARATOR}</text> : null}
+                  <text fg={label.fg ?? theme.assistantMsg}>{label.text}</text>
+                </>
+              )}
+            </For>
+          </box>
+        )}
+      </For>
     </box>
   )
 }

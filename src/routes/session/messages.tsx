@@ -152,13 +152,12 @@ function stripHorizontalRules(md: string): string {
     .replace(/\n{3,}/g, "\n\n")
 }
 
-// Convert GitHub-style markdown tables into a plain text grid so opentui's
-// markdown renderer (tree-sitter highlighter, no real table layout) doesn't
-// drop rows or render only the header. We pad each cell to the column's
-// max width and surround with spaces; the result is monospace-aligned text
-// the markdown renderer treats as a code-ish block. Idempotent on input
-// without tables.
-function flattenMarkdownTables(md: string): string {
+// Convert GitHub-style markdown tables into width-safe labeled blocks. Full
+// box-drawing grids look nice until a cell is wider than the terminal; then
+// native wrapping splits the borders and produces unreadable horizontal rules.
+// Blocks preserve all cell content while allowing the normal word wrapper to
+// handle long descriptions.
+function expandMarkdownTables(md: string): string {
   const lines = md.split("\n")
   const out: string[] = []
   let i = 0
@@ -184,34 +183,19 @@ function flattenMarkdownTables(md: string): string {
         rows.push(splitRow(lines[j]))
         j++
       }
-      const cols = Math.max(...rows.map((r) => r.length))
-      const widths = new Array(cols).fill(0)
-      for (const r of rows) {
-        for (let c = 0; c < cols; c++) {
-          widths[c] = Math.max(widths[c], (r[c] ?? "").length)
+      const headers = rows[0]
+      const bodyRows = rows.slice(1)
+      for (const row of bodyRows) {
+        const rowLabel = row[0]?.trim()
+        if (rowLabel) out.push(rowLabel)
+        for (let c = 1; c < Math.max(headers.length, row.length); c++) {
+          const label = headers[c]?.trim()
+          const value = row[c]?.trim()
+          if (!label && !value) continue
+          out.push(`- ${label || `Column ${c + 1}`}: ${value ?? ""}`)
         }
+        out.push("")
       }
-      // Render a full box-drawing table inside a markdown code block so the
-      // tree-sitter highlighter preserves all whitespace perfectly.
-      const PAD = " "
-      const padCell = (cell: string, w: number) => PAD + (cell ?? "").padEnd(w, PAD) + PAD
-      const border = (left: string, mid: string, right: string) =>
-        left + widths.map((w) => "─".repeat(w + 2)).join(mid) + right
-      const formatRow = (r: string[]): string =>
-        "│" + widths.map((w, c) => padCell(r[c] ?? "", w)).join("│") + "│"
-      out.push("```text")
-      out.push(border("┌", "┬", "┐"))
-      out.push(formatRow(rows[0]))
-      out.push(border("├", "┼", "┤"))
-      for (let r = 1; r < rows.length; r++) {
-        out.push(formatRow(rows[r]))
-        if (r < rows.length - 1) {
-          out.push(border("├", "┼", "┤"))
-        }
-      }
-      out.push(border("└", "┴", "┘"))
-      out.push("```")
-      out.push("")
       i = j
       continue
     }
@@ -259,7 +243,7 @@ function wrapMarkdownProse(md: string, width: number): string {
 }
 
 export function prepareMarkdown(md: string, width = 80): string {
-  return wrapMarkdownProse(flattenMarkdownTables(stripHorizontalRules(md)), width)
+  return wrapMarkdownProse(expandMarkdownTables(stripHorizontalRules(md)), width)
 }
 
 interface InlineSegment {
@@ -400,7 +384,7 @@ function renderTextLine(line: string, width: number): RenderLine[] {
 }
 
 export function renderMarkdownLines(md: string, width = 80): RenderLine[] {
-  const lines = flattenMarkdownTables(stripHorizontalRules(md)).split("\n")
+  const lines = expandMarkdownTables(stripHorizontalRules(md)).split("\n")
   const out: RenderLine[] = []
   let inFence = false
 
@@ -559,23 +543,23 @@ function trimContext(lines: DiffLine[]): DiffLine[] {
 
 const MAX_DIFF_RENDER_LINES = 60
 
-function InlineSegmentView(props: { segment: InlineSegment }) {
+function InlineSegmentView(props: { segment: InlineSegment; baseFg: string }) {
   const theme = useTheme()
-  const style = props.segment.code
-    ? { fg: theme.toolName }
+  const fg = props.segment.code
+    ? theme.toolName
     : props.segment.link || props.segment.listMarker
-      ? { fg: theme.info }
-      : {}
+      ? theme.info
+      : props.baseFg
 
   if (props.segment.bold) {
     return (
-      <strong>
-        <span {...style}>{props.segment.text}</span>
-      </strong>
+      <text fg={fg}>
+        <strong>{props.segment.text}</strong>
+      </text>
     )
   }
 
-  return <span {...style}>{props.segment.text}</span>
+  return <text fg={fg}>{props.segment.text}</text>
 }
 
 function ItemView(props: {
@@ -635,11 +619,11 @@ function ItemView(props: {
                     </text>
                   }
                 >
-                  <text fg={theme.assistantMsg}>
+                  <box flexDirection="row">
                     <For each={line.segments ?? []}>
-                      {(segment) => <InlineSegmentView segment={segment} />}
+                      {(segment) => <InlineSegmentView segment={segment} baseFg={theme.assistantMsg} />}
                     </For>
-                  </text>
+                  </box>
                 </Show>
               )}
             </For>
@@ -757,12 +741,11 @@ function ToolItemView(props: { item: Extract<DisplayItem, { kind: "tool" }> }) {
         <text fg={theme.textDim}>{summarizeToolInput(props.item.inputJson)}</text>
         <Show when={!props.item.running && stats()}>
           {(s) => (
-            <text fg={theme.textDim}>
-              {/* fg via spread: upstream SpanProps types span options as {} even
-                  though TextNodeRenderable supports fg at runtime. A spread
-                  skips TS excess-property checks; a literal attribute errors. */}
-              <span {...{ fg: theme.success }}>{`+${s().add}`}</span> <span {...{ fg: theme.error }}>{`-${s().del}`}</span>
-            </text>
+            <box flexDirection="row">
+              <text fg={theme.success}>{`+${s().add}`}</text>
+              <text fg={theme.textDim}> </text>
+              <text fg={theme.error}>{`-${s().del}`}</text>
+            </box>
           )}
         </Show>
         <Show when={!props.item.running}>
@@ -778,7 +761,7 @@ function ToolItemView(props: { item: Extract<DisplayItem, { kind: "tool" }> }) {
             {(line) => (
               <box>
                 <text
-                  fg={line.kind === "ctx" ? theme.textDim : "#ffffff"}
+                  fg={line.kind === "ctx" ? theme.textDim : theme.assistantMsg}
                   bg={line.kind === "add" ? "#1f6f3d" : line.kind === "del" ? "#7a1d1d" : undefined}
                 >
                   {`${line.kind === "add" ? "+ " : line.kind === "del" ? "- " : "  "}${line.text}`}

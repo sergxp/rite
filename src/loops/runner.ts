@@ -259,7 +259,7 @@ async function runLoopCore(
     session.turns.push({ role: "assistant", content: out });
   }
   await SessionStore.save(session);
-  return lastOutput;
+  return allOutputs || lastOutput;
 }
 
 export async function runLoop(

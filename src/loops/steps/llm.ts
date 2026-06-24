@@ -1,12 +1,30 @@
 import { getBackend } from "../../backends/index.js";
 import { drainAgentStream } from "../../backends/drain.js";
-import { resolveTemplate } from "../../utils/template.js";
+import { formatSessionContext, resolveTemplate } from "../../utils/template.js";
 import type { LlmStep } from "../types.js";
 import type { StepContext } from "../runner.js";
 
 export interface LlmStepResult {
   output: string;
   resolvedPrompt: string;
+}
+
+function promptReferencesSessionContext(prompt: string): boolean {
+  return /\{\{\{?\s*session_context\s*\}?\}\}/.test(prompt);
+}
+
+export function injectLoopSessionContext(prompt: string, context: StepContext): string {
+  if (promptReferencesSessionContext(prompt)) return resolveTemplate(prompt, context);
+
+  const sessionContext = formatSessionContext(context);
+  const resolvedPrompt = resolveTemplate(prompt, context);
+  return [
+    "Recent Rite session context:",
+    sessionContext,
+    "",
+    "Loop step prompt:",
+    resolvedPrompt,
+  ].join("\n");
 }
 
 export async function runLlmStep(
@@ -26,7 +44,7 @@ export async function runLlmStep(
   const backend = context.config.backend ?? "claude";
   const backendFn = getBackend(backend);
 
-  const resolvedPrompt = resolveTemplate(step.prompt, context);
+  const resolvedPrompt = injectLoopSessionContext(step.prompt, context);
   const stream = backendFn(resolvedPrompt, options?.signal,
     (step.model || step.effort) ? { model: step.model, effort: step.effort } : undefined);
 

@@ -34,3 +34,44 @@ describe("session composer review draft", () => {
     expect(text).not.toContain("✻ correcting")
   })
 })
+
+describe("session composer loop context handoff", () => {
+  const source = () => readFileSync(new URL("../../../src/routes/session/composer.tsx", import.meta.url), "utf8")
+
+  it("records loop turns into live conversation history for the regular agent", () => {
+    const text = source()
+
+    expect(text).toContain("formatLoopHistoryAnswer")
+    expect(text).toContain('history.add("user", userText)')
+    expect(text).toContain('history.add("assistant", assistantContent)')
+    expect(text).toContain("recordLoopTurn(props.session, props.history, loop.name")
+    expect(text).toContain("recordLoopTurn(s, props.history, loop.name")
+  })
+
+  it("settles loop transcript and footer status when loops finish", () => {
+    const text = source()
+
+    expect(text).toContain("function settleLoopDisplayItems")
+    expect(text).toContain("store.setItems(sid, settled)")
+    expect(text).toContain('item.kind === "assistant" || item.kind === "thinking"')
+    expect(text).toContain('item.kind === "tool"')
+    expect(text).toContain("props.onStatus(\"\")")
+    expect(text).toContain("props.session.displayItems = settledItems")
+    expect(text).toContain("s.displayItems = settledItems")
+  })
+
+  it("persists loop display items after attaching them to the session", () => {
+    const text = source()
+    const recordLoopTurnBody = text.slice(text.indexOf("function recordLoopTurn"), text.indexOf("function completionsFor"))
+    const slashDisplayItems = text.indexOf("props.session.displayItems = settledItems")
+    const slashSave = text.indexOf("await SessionStore.save(props.session)", slashDisplayItems)
+    const activeDisplayItems = text.indexOf("s.displayItems = settledItems")
+    const activeSave = text.indexOf("await SessionStore.save(s)", activeDisplayItems)
+
+    expect(recordLoopTurnBody).not.toContain("SessionStore.save")
+    expect(slashDisplayItems).toBeGreaterThan(-1)
+    expect(slashSave).toBeGreaterThan(slashDisplayItems)
+    expect(activeDisplayItems).toBeGreaterThan(-1)
+    expect(activeSave).toBeGreaterThan(activeDisplayItems)
+  })
+})

@@ -11,8 +11,6 @@ import { SessionStore } from "../../sessions/store"
 import { ConversationHistory } from "../../history/history"
 import type { Session as SessionType } from "../../sessions/types"
 
-// Height reserved for composer (min 3) and footer (1)
-const FOOTER_HEIGHT = 1
 const COMPOSER_MIN_HEIGHT = 3 // 2 borders + 1 input row
 export const MAX_SIDEBAR_FORK_ROWS = 6
 
@@ -94,6 +92,7 @@ export function Session() {
 
   const [session, setSession] = createSignal<SessionType | null>(null)
   const [composerHeight, setComposerHeight] = createSignal(COMPOSER_MIN_HEIGHT)
+  const [footerHeight, setFooterHeight] = createSignal(1)
   const [streaming, setStreaming] = createSignal(false)
   // Transient activity line for the footer: "✻ thinking…", "⏳ Bash", "* saved 2"
   const [status, setStatus] = createSignal("")
@@ -141,7 +140,7 @@ export function Session() {
   })
 
   const msgAreaHeight = () =>
-    Math.max(1, dimensions().height - composerHeight() - FOOTER_HEIGHT)
+    Math.max(1, dimensions().height - composerHeight() - footerHeight())
 
   const hasForks = createMemo(() => {
     const s = session()
@@ -171,7 +170,13 @@ export function Session() {
               }}
               onStatus={setStatus}
             />
-            <Footer session={s()} streaming={streaming()} status={status()} />
+            <Footer
+              session={s()}
+              streaming={streaming()}
+              status={status()}
+              width={hasForks() ? dimensions().width - 30 : dimensions().width}
+              onHeightChange={setFooterHeight}
+            />
           </box>
           <Show when={hasForks() && s().groupId}>
             <Sidebar

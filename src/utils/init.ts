@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, writeFileSync } from "fs";
 import { join } from "path";
 import os from "os";
+import firstPrinciplesResearcher from "../loops/defaults/first-principles-researcher.json" with { type: "json" };
 import peerProgramming from "../loops/defaults/peer-programming.json" with { type: "json" };
 
 const GITIGNORE_CONTENT = `memory/*.md
@@ -13,6 +14,7 @@ logs/
 `;
 
 const DEFAULT_LOOPS: Array<{ name: string; filename: string; content: unknown }> = [
+  { name: "first-principles-researcher", filename: "first-principles-researcher.json", content: firstPrinciplesResearcher },
   { name: "peer-programming", filename: "peer-programming.json", content: peerProgramming },
 ];
 

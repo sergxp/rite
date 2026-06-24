@@ -1,6 +1,14 @@
 import Mustache from "mustache";
 import type { StepContext } from "../loops/runner.js";
 
+export function formatSessionContext(context: StepContext): string {
+  return (
+    (context.conversationHistory ?? [])
+      .map((t) => `${t.role === "user" ? "User" : "Assistant"}: ${t.content}`)
+      .join("\n\n") || "(no prior conversation)"
+  );
+}
+
 export function resolveTemplate(template: string, context: StepContext): string {
   // Pre-pass: replace {{steps.ID.output}} patterns before Mustache processes them
   // Mustache can't handle dynamic keys, so we substitute these manually first
@@ -29,11 +37,6 @@ export function resolveTemplate(template: string, context: StepContext): string 
     .map((m) => m.content)
     .join("\n\n---\n\n");
 
-  const sessionContext =
-    (context.conversationHistory ?? [])
-      .map((t) => `${t.role === "user" ? "User" : "Assistant"}: ${t.content}`)
-      .join("\n\n") || "(no prior conversation)";
-
   const view = {
     memory: {
       always: alwaysContent,
@@ -42,7 +45,7 @@ export function resolveTemplate(template: string, context: StepContext): string 
       project: projectContent,
     },
     context: context.context,
-    session_context: sessionContext,
+    session_context: formatSessionContext(context),
   };
 
   return Mustache.render(preProcessed, view);

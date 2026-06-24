@@ -84,13 +84,25 @@ const SLASH_COMMANDS = [
 
 const CLAUDE_MODELS = ["claude-fable-5", "claude-opus-4-8", "claude-sonnet-4-6"]
 
-function recordLoopTurn(session: Session, userText: string, finalAnswer: string | undefined) {
+function formatLoopHistoryAnswer(loopName: string, finalAnswer: string): string {
+  return `Loop "${loopName}" output:\n\n${finalAnswer.trim()}`
+}
+
+function recordLoopTurn(
+  session: Session,
+  history: ConversationHistory,
+  loopName: string,
+  userText: string,
+  finalAnswer: string | undefined,
+) {
   session.turns.push({ role: "user", content: userText })
+  history.add("user", userText)
   if (finalAnswer?.trim()) {
-    session.turns.push({ role: "assistant", content: finalAnswer.trim() })
+    const assistantContent = formatLoopHistoryAnswer(loopName, finalAnswer)
+    session.turns.push({ role: "assistant", content: assistantContent })
+    history.add("assistant", assistantContent)
   }
   session.updatedAt = new Date().toISOString()
-  void SessionStore.save(session)
 }
 
 function completionsFor(value: string): string[] {
@@ -578,6 +590,16 @@ export function Composer(props: ComposerProps) {
     }
   }
 
+  function settleLoopDisplayItems(sid: string) {
+    const settled = (store.store.items[sid] ?? []).map((item) => {
+      if (item.kind === "assistant" || item.kind === "thinking") return { ...item, streaming: false }
+      if (item.kind === "tool") return { ...item, running: false }
+      return item
+    })
+    store.setItems(sid, settled)
+    return settled
+  }
+
   async function runLoop(name: string, context: string) {
     const loops = loadLoops()
     const loop = findLoop(name)
@@ -627,11 +649,12 @@ export function Composer(props: ComposerProps) {
     } catch (err) {
       addSystem(`Loop failed: ${(err as Error).message}`)
     } finally {
-      store.updateLastItem(sessionId(), (i) => {
-        if (i.kind === "assistant") i.streaming = false
-      })
+      const settledItems = settleLoopDisplayItems(sid)
       loopInputResolver = null
-      recordLoopTurn(props.session, context, slashFinalAnswer)
+      props.onStatus("")
+      recordLoopTurn(props.session, props.history, loop.name, context, slashFinalAnswer)
+      props.session.displayItems = settledItems
+      await SessionStore.save(props.session)
       store.upsertSession({ ...props.session })
       setAbortController(null)
       props.onStreamEnd()
@@ -863,15 +886,12 @@ export function Composer(props: ComposerProps) {
             ...makeLoopToolCallbacks(loopSid),
           }, loopHistory, ac.signal)
         } finally {
-          store.updateLastItem(loopSid, (i) => { if (i.kind === "assistant") i.streaming = false })
+          const settledItems = settleLoopDisplayItems(loopSid)
           loopInputResolver = null
           props.onStatus("")
-          recordLoopTurn(s, text, activeFinalAnswer)
-          s.displayItems = (store.store.items[loopSid] ?? []).map((item) => {
-            if (item.kind === "assistant" || item.kind === "thinking") return { ...item, streaming: false }
-            if (item.kind === "tool") return { ...item, running: false }
-            return item
-          })
+          recordLoopTurn(s, props.history, loop.name, text, activeFinalAnswer)
+          s.displayItems = settledItems
+          await SessionStore.save(s)
           store.upsertSession({ ...s })
         }
       }

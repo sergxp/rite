@@ -135,11 +135,42 @@ describe("assistant markdown preparation", () => {
     expect(rendered).not.toContain("iter\nating")
   })
 
+  it("renders wide markdown tables as wrapped labeled blocks, not box grids", () => {
+    const table = [
+      "| Dimension | WSL2 on existing RD VM | Dedicated Linux VM |",
+      "|---|---|---|",
+      "| **Stability** | WSL2 memory balloon is unbounded by default; the vmmem process can eat available RAM with no warning | Isolated Docker problems do not affect relay-desk |",
+    ].join("\n")
+    const rendered = renderMarkdownLines(table, 48)
+    const text = rendered
+      .map((line) => line.segments?.map((s) => s.text).join("") ?? line.text ?? "")
+      .join("\n")
+
+    expect(text).toContain("Stability")
+    expect(text).toContain("- WSL2 on existing RD VM:")
+    expect(text).toContain("- Dedicated Linux VM:")
+    expect(text).not.toContain("┌")
+    expect(text).not.toContain("│")
+    expect(text).not.toContain("─")
+    expect(text).not.toContain("unbou\nnded")
+  })
+
   it("uses native strong nodes for visible bold rendering", () => {
     const source = readFileSync(new URL("../../../src/routes/session/messages.tsx", import.meta.url), "utf8")
     const inlineSegmentView = source.slice(source.indexOf("function InlineSegmentView"), source.indexOf("function ItemView"))
 
     expect(inlineSegmentView).toContain("<strong>")
+    expect(inlineSegmentView).toContain("<text fg={fg}>")
+    expect(inlineSegmentView).not.toContain("<span")
     expect(inlineSegmentView).not.toContain("bold: true")
+  })
+
+  it("keeps display colors on direct text nodes instead of nested spans", () => {
+    const source = readFileSync(new URL("../../../src/routes/session/messages.tsx", import.meta.url), "utf8")
+
+    expect(source).toContain("<InlineSegmentView segment={segment} baseFg={theme.assistantMsg} />")
+    expect(source).toContain("<text fg={theme.success}>{`+${s().add}`}</text>")
+    expect(source).toContain("<text fg={theme.error}>{`-${s().del}`}</text>")
+    expect(source).not.toContain("<span")
   })
 })

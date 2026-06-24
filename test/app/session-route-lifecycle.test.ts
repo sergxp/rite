@@ -11,4 +11,13 @@ describe("session route lifecycle", () => {
     expect(sessionRoute).not.toContain("keyed")
     expect(sessionSource).not.toContain("<Show when={session()} keyed")
   })
+
+  it("reserves dynamic footer height for wrapped footer labels", () => {
+    const sessionSource = readFileSync(new URL("../../src/routes/session/index.tsx", import.meta.url), "utf8")
+
+    expect(sessionSource).toContain("const [footerHeight, setFooterHeight] = createSignal(1)")
+    expect(sessionSource).toContain("dimensions().height - composerHeight() - footerHeight()")
+    expect(sessionSource).toContain("onHeightChange={setFooterHeight}")
+    expect(sessionSource).not.toContain("FOOTER_HEIGHT")
+  })
 })

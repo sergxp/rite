@@ -16,6 +16,11 @@ function notFoundError(): Error {
   )
 }
 
+export function resolveClaudeEffort(model?: string, effort?: string): string | undefined {
+  if (effort) return effort
+  return model?.includes("opus") ? "low" : undefined
+}
+
 function noHooksSettingsPath(): string {
   const dir = join(os.homedir(), ".rite")
   const path = join(dir, "utility-settings.json")
@@ -94,14 +99,16 @@ export async function* callClaude(
   if (opts?.model) {
     args.push("--model", opts.model)
   }
-  if (opts?.effort) {
-    args.push("--effort", opts.effort)
+  const effort = resolveClaudeEffort(opts?.model, opts?.effort)
+  if (effort) {
+    args.push("--effort", effort)
   }
 
   const turnLog = log.child("claude.stream", {
     sessionId: opts?.sessionId,
     turnId: opts?.turnId,
     model: opts?.model,
+    effort,
   })
   turnLog.info("turn.start", {
     promptLen: prompt.length,

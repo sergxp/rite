@@ -31,13 +31,39 @@ export const TRANSCRIPT_WINDOW_SIZE = 60
 // How many additional items to prepend each time the user presses Ctrl+U.
 export const TRANSCRIPT_LOAD_MORE_STEP = 40
 
+export interface TranscriptWindow {
+  visible: DisplayItem[]
+  start: number
+  hiddenBefore: number
+  hiddenAfter: number
+}
+
+export function transcriptWindow(items: DisplayItem[], requestedStart: number): TranscriptWindow {
+  if (items.length <= TRANSCRIPT_WINDOW_SIZE) {
+    return { visible: items, start: 0, hiddenBefore: 0, hiddenAfter: 0 }
+  }
+
+  const naturalStart = Math.max(0, items.length - TRANSCRIPT_WINDOW_SIZE)
+  // During session resume, the signal starts as a sentinel before the
+  // tail-snapping effect runs. Treat that sentinel as "show newest" so the first render
+  // never hands an entire long transcript to OpenTUI.
+  const start = requestedStart < 0 ? naturalStart : Math.min(Math.max(0, requestedStart), naturalStart)
+  const end = Math.min(items.length, start + TRANSCRIPT_WINDOW_SIZE)
+  return {
+    visible: items.slice(start, end),
+    start,
+    hiddenBefore: start,
+    hiddenAfter: items.length - end,
+  }
+}
+
 export function Messages(props: MessagesProps) {
   const theme = useTheme()
   const store = useSessionStore()
 
   // Index into the full items array where our rendered window starts.
   // Defaults to the bottom (show newest). Resets when the session changes.
-  const [windowStart, setWindowStart] = createSignal(0)
+  const [windowStart, setWindowStart] = createSignal(-1)
   createEffect(() => {
     const all = store.store.items[props.sessionId] ?? []
     // On initial session load or when new items arrive below the window,
@@ -47,7 +73,7 @@ export function Messages(props: MessagesProps) {
     setWindowStart((prev) => {
       // If the user has scrolled up into history (prev < naturalStart - 5),
       // keep their position so new assistant streaming doesn't jerk the view.
-      if (prev > 0 && prev < naturalStart - 5) return prev
+      if (prev >= 0 && prev < naturalStart - 5) return prev
       return naturalStart
     })
   })
@@ -55,15 +81,21 @@ export function Messages(props: MessagesProps) {
   // Ctrl+U: load an earlier batch — extend the window backward.
   useKeyboard((key) => {
     if (key.ctrl && key.name === "u") {
-      setWindowStart((prev) => Math.max(0, prev - TRANSCRIPT_LOAD_MORE_STEP))
+      const naturalStart = Math.max(0, allItems().length - TRANSCRIPT_WINDOW_SIZE)
+      setWindowStart((prev) => Math.max(0, (prev < 0 ? naturalStart : prev) - TRANSCRIPT_LOAD_MORE_STEP))
+    }
+    if (key.ctrl && key.name === "d") {
+      const naturalStart = Math.max(0, allItems().length - TRANSCRIPT_WINDOW_SIZE)
+      setWindowStart((prev) => Math.min(naturalStart, (prev < 0 ? naturalStart : prev) + TRANSCRIPT_LOAD_MORE_STEP))
     }
   })
 
   const allItems = createMemo(() => store.store.items[props.sessionId] ?? [])
-  const hiddenCount = createMemo(() => windowStart())
+  const itemWindow = createMemo(() => transcriptWindow(allItems(), windowStart()))
+  const hiddenCount = createMemo(() => itemWindow().hiddenBefore)
+  const hiddenAfter = createMemo(() => itemWindow().hiddenAfter)
   const items = createMemo(() => {
-    const all = allItems()
-    return all.slice(windowStart())
+    return itemWindow().visible
   })
 
   return (
@@ -89,7 +121,7 @@ export function Messages(props: MessagesProps) {
       <Show when={hiddenCount() > 0}>
         <box paddingLeft={CONTENT_INDENT} marginBottom={1}>
           <text fg={theme.textDim}>
-            {`↑ ${hiddenCount()} earlier message${hiddenCount() === 1 ? "" : "s"} — Ctrl+U to load more`}
+            {`↑ ${hiddenCount()} earlier message${hiddenCount() === 1 ? "" : "s"} — Ctrl+U earlier`}
           </text>
         </box>
       </Show>
@@ -106,13 +138,21 @@ export function Messages(props: MessagesProps) {
           <ItemView
             item={item}
             contentWidth={Math.max(20, props.width - CONTENT_INDENT - TRANSCRIPT_CHROME_WIDTH)}
-            copyId={`${props.sessionId}-md-${windowStart() + i()}`}
+            copyId={`${props.sessionId}-md-${itemWindow().start + i()}`}
             showRiteLabel={startsTurn(items(), i())}
             turnStart={startsTurn(items(), i())}
             turnEnd={endsTurn(items(), i())}
           />
         )}
       </For>
+
+      <Show when={hiddenAfter() > 0}>
+        <box paddingLeft={CONTENT_INDENT} marginTop={1}>
+          <text fg={theme.textDim}>
+            {`↓ ${hiddenAfter()} later message${hiddenAfter() === 1 ? "" : "s"} — Ctrl+D later`}
+          </text>
+        </box>
+      </Show>
     </scrollbox>
   )
 }
